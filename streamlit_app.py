@@ -7,13 +7,22 @@
 from __future__ import annotations
 
 import html
-from datetime import date
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
 from supabase import create_client
 
 STATUS_VALUES = ["未訪問", "訪問済", "前向き", "断り"]
+
+
+def maps_link(name, place_id) -> str:
+    """Google Maps URL that opens the exact business (by place_id)."""
+    q = quote(str(name or ""))
+    pid = str(place_id or "")
+    if pid:
+        return f"https://www.google.com/maps/search/?api=1&query={q}&query_place_id={pid}"
+    return f"https://www.google.com/maps/search/?api=1&query={q}"
 STATUS_RGB = {"未訪問": "#e8453c", "訪問済": "#4285F4", "前向き": "#34A853", "断り": "#9AA0A6"}
 EDITABLE = ["status", "visit_date", "memo"]
 
@@ -50,6 +59,8 @@ def fetch() -> pd.DataFrame:
     for c in EDITABLE:
         if c not in df:
             df[c] = None
+    if not df.empty:
+        df["map_url"] = df.apply(lambda r: maps_link(r.get("name"), r.get("place_id")), axis=1)
     return df
 
 
@@ -78,10 +89,14 @@ def save_changes(edited: pd.DataFrame, original: pd.DataFrame):
 def google_map(rows: list[dict], key: str, scale: int, height: int = 460) -> str:
     markers = [{
         "lat": r["lat"], "lng": r["lng"], "c": STATUS_RGB.get(r["status"], "#e8453c"),
-        "t": (f"<div style='font:13px sans-serif;max-width:240px'><b>{html.escape(str(r['name']))}</b><br>"
-              f"{html.escape(str(r['type_or_craft']))} ・ {html.escape(str(r['area_cluster']))}<br>"
+        "t": (f"<div style='font:13px sans-serif;max-width:250px;line-height:1.5'>"
+              f"<b>{html.escape(str(r['name']))}</b><br>"
+              f"Type: {html.escape(str(r['type_or_craft']))}<br>"
+              f"エリア: {html.escape(str(r['area_cluster']))}<br>"
+              f"状態: {html.escape(str(r['status']))}<br>"
               f"<span style='color:#666'>{html.escape(str(r.get('address') or ''))}</span><br>"
-              f"状態: {html.escape(str(r['status']))}</div>"),
+              f"<a href='{html.escape(maps_link(r.get('name'), r.get('place_id')))}' "
+              f"target='_blank' rel='noopener'>📍 Googleマップで開く</a></div>"),
     } for r in rows]
     import json
     data = json.dumps(markers)
@@ -155,24 +170,27 @@ def main():
 
     # editable table
     st.subheader("リスト（編集して保存）")
-    st.caption("status はプルダウン、メモは自由入力。編集後に下の「保存」を押す。")
-    view_cols = ["name", "type_or_craft", "tier", "area_cluster", "status",
-                 "visit_date", "memo", "phone", "address", "independent_confidence", "place_id"]
+    st.caption("**状態**セルをタップ→プルダウンで選択。住所は📍でGoogleマップが開く。編集後に「保存」。")
+    view_cols = ["name", "status", "visit_date", "memo", "type_or_craft", "tier",
+                 "area_cluster", "map_url", "phone", "independent_confidence", "place_id"]
     view_cols = [c for c in view_cols if c in f.columns]
     edited = st.data_editor(
         f[view_cols],
         hide_index=True,
         use_container_width=True,
+        column_order=view_cols,
         column_config={
             "name": st.column_config.TextColumn("店名", disabled=True),
-            "type_or_craft": st.column_config.TextColumn("業種", disabled=True),
-            "tier": st.column_config.TextColumn("Tier", disabled=True),
-            "area_cluster": st.column_config.TextColumn("エリア", disabled=True),
-            "status": st.column_config.SelectboxColumn("状態", options=STATUS_VALUES, required=True),
+            "status": st.column_config.SelectboxColumn(
+                "状態", options=STATUS_VALUES, required=True, width="small"),
             "visit_date": st.column_config.TextColumn("訪問日"),
             "memo": st.column_config.TextColumn("メモ", width="large"),
+            "type_or_craft": st.column_config.TextColumn("Type", disabled=True),
+            "tier": st.column_config.TextColumn("Tier", disabled=True),
+            "area_cluster": st.column_config.TextColumn("エリア", disabled=True),
+            "map_url": st.column_config.LinkColumn(
+                "住所（地図）", display_text="📍 地図で開く", disabled=True),
             "phone": st.column_config.TextColumn("電話", disabled=True),
-            "address": st.column_config.TextColumn("住所", disabled=True),
             "independent_confidence": st.column_config.TextColumn("独立度", disabled=True),
             "place_id": st.column_config.TextColumn("id", disabled=True),
         },
