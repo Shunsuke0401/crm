@@ -104,6 +104,7 @@ def google_map(rows: list[dict], key: str, scale: int, height: int = 460) -> str
     clng = sum(r["lng"] for r in rows) / len(rows)
     return f"""
 <div id="map" style="height:{height}px;width:100%;border-radius:8px"></div>
+<div id="geo" style="font:12px sans-serif;color:#888;margin-top:4px"></div>
 <script>
   const M={data};
   function initMap(){{
@@ -116,6 +117,39 @@ def google_map(rows: list[dict], key: str, scale: int, height: int = 460) -> str
                fillOpacity:1,strokeColor:"#fff",strokeWeight:1.5}}}});
       mk.addListener("click",()=>{{info.setContent(m.t);info.open(map,mk);}});
     }});
+
+    // ---- current location (blue dot + accuracy circle + live tracking) ----
+    const geo=document.getElementById("geo");
+    let meDot=null, meRing=null, mePos=null;
+    function showMe(pos){{
+      const p={{lat:pos.coords.latitude,lng:pos.coords.longitude}};
+      mePos=p;
+      const acc=pos.coords.accuracy||30;
+      if(!meDot){{
+        meDot=new google.maps.Marker({{position:p,map,zIndex:9999,title:"現在地",
+          icon:{{path:google.maps.SymbolPath.CIRCLE,scale:7,fillColor:"#4285F4",
+                 fillOpacity:1,strokeColor:"#fff",strokeWeight:3}}}});
+        meRing=new google.maps.Circle({{map,center:p,radius:acc,fillColor:"#4285F4",
+          fillOpacity:0.12,strokeColor:"#4285F4",strokeOpacity:0.35,strokeWeight:1}});
+        map.setCenter(p);
+      }} else {{ meDot.setPosition(p); meRing.setCenter(p); meRing.setRadius(acc); }}
+      geo.textContent="現在地を表示中（青い点）";
+    }}
+    function geoErr(e){{ geo.textContent="現在地を取得できません（位置情報の許可が必要）: "+e.message; }}
+
+    // recenter button
+    const btn=document.createElement("button");
+    btn.textContent="📍 現在地";
+    btn.style.cssText="margin:8px;padding:8px 12px;border:none;border-radius:6px;"
+      +"background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3);font:13px sans-serif;cursor:pointer";
+    btn.onclick=()=>{{ if(mePos){{map.setCenter(mePos);map.setZoom(16);}} }};
+    map.controls[google.maps.ControlPosition.TOP_RIGHT].push(btn);
+
+    if(navigator.geolocation){{
+      const opt={{enableHighAccuracy:true,maximumAge:5000,timeout:10000}};
+      navigator.geolocation.getCurrentPosition(showMe,geoErr,opt);
+      navigator.geolocation.watchPosition(showMe,geoErr,opt);
+    }} else {{ geo.textContent="この端末は位置情報に対応していません。"; }}
   }}
 </script>
 <script async src="https://maps.googleapis.com/maps/api/js?key={key}&callback=initMap&language=ja&region=JP"></script>
