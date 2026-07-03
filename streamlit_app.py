@@ -1,140 +1,105 @@
 """
-訪問先 CRM — 公開・閲覧専用版（iPhone からどこでも見る用）。
-
-- 編集はしない（現場では「どこに行くか」を見るだけ）。記録はローカル版(store-crm/app.py)で。
-- データは同梱スナップショット data/stores.csv（ローカルで export_snapshot.py → push で更新）。
-- パスワードゲート + Google Maps キーは Streamlit secrets から読む（リポジトリには入れない）。
-
-Deploy: Streamlit Community Cloud → main file = streamlit_app.py。
-Secrets（Streamlit Cloud の Settings → Secrets）:
-    APP_PASSWORD = "……"
-    GOOGLE_MAPS_API_KEY = "……"
+訪問先CRM（ホスト版・スマホから編集可）— Supabase(Postgres) バックエンド。
+- データは Supabase に永続（再起動で消えない・複数端末で共有）。
+- status / 訪問日 / メモ をこの画面から編集→保存。
+- Secrets: SUPABASE_URL, SUPABASE_KEY, GOOGLE_MAPS_API_KEY, APP_PASSWORD(任意)
 """
 from __future__ import annotations
 
 import html
-import io
-import json
-from pathlib import Path
+from datetime import date
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
+from supabase import create_client
 
-HERE = Path(__file__).resolve().parent
-DATA = HERE / "data" / "stores.csv"   # local-dev fallback only (gitignored, PII)
 STATUS_VALUES = ["未訪問", "訪問済", "前向き", "断り"]
+STATUS_RGB = {"未訪問": "#e8453c", "訪問済": "#4285F4", "前向き": "#34A853", "断り": "#9AA0A6"}
+EDITABLE = ["status", "visit_date", "memo"]
 
-st.set_page_config(page_title="訪問先マップ — 職人・店", layout="wide")
+st.set_page_config(page_title="訪問先CRM", page_icon="🗺️", layout="wide")
 
 
-# --- password gate -----------------------------------------------------------
-def check_password() -> bool:
-    want = st.secrets.get("APP_PASSWORD")
-    if not want:
-        # パスワード任意: 未設定なら鍵なし（ランダムURLのみが保護）。
+# ---- optional password gate -------------------------------------------------
+def gate() -> bool:
+    pw = st.secrets.get("APP_PASSWORD", "")
+    if not pw:
         return True
     if st.session_state.get("authed"):
         return True
     with st.form("login"):
-        pw = st.text_input("パスワード", type="password")
-        if st.form_submit_button("入る") and pw == want:
+        st.subheader("🔒 合言葉")
+        entry = st.text_input("パスワード", type="password")
+        if st.form_submit_button("入る") and entry == pw:
             st.session_state["authed"] = True
             st.rerun()
-        elif pw and pw != want:
-            st.error("パスワードが違います。")
-    return st.session_state.get("authed", False)
+    return False
 
 
-if not check_password():
-    st.stop()
+@st.cache_resource
+def client():
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 
-# --- data --------------------------------------------------------------------
-@st.cache_data
-def load() -> pd.DataFrame:
-    # public repo holds NO data (PII). On the hosted app the store list comes from
-    # the STORES_CSV secret; locally it falls back to the gitignored data/stores.csv.
-    csv_text = st.secrets.get("STORES_CSV")
-    if csv_text:
-        df = pd.read_csv(io.StringIO(csv_text))
-    elif DATA.exists():
-        df = pd.read_csv(DATA)
-    else:
-        st.error("データがありません。Streamlit Cloud の Secrets に STORES_CSV を設定してください。")
-        st.stop()
+def fetch() -> pd.DataFrame:
+    rows = client().table("stores").select("*").order("priority_rank").execute().data
+    df = pd.DataFrame(rows)
     for c in ("lat", "lng"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    if "memo" not in df.columns:
-        df["memo"] = ""
+        if c in df:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in EDITABLE:
+        if c not in df:
+            df[c] = None
     return df
 
 
-df = load()
-
-st.title("訪問先マップ — 個人経営×熟練手技の店")
-st.caption("閲覧専用。現場で「どこに行くか」を見る用。記録はローカル版で。")
-
-# --- filters -----------------------------------------------------------------
-st.sidebar.header("フィルタ")
-areas = sorted(df["area_cluster"].dropna().unique().tolist())
-crafts = sorted(df["type_or_craft"].dropna().unique().tolist())
-tiers = sorted(df["tier"].dropna().unique().tolist())
-area_f = st.sidebar.multiselect("エリア", areas, default=areas)
-tier_f = st.sidebar.multiselect("Tier", tiers, default=tiers)
-craft_f = st.sidebar.multiselect("業種 / craft", crafts, default=[])
-status_f = st.sidebar.multiselect("ステータス", STATUS_VALUES, default=STATUS_VALUES)
-q = st.sidebar.text_input("検索（店名 / 住所 / メモ）")
-
-f = df.copy()
-if area_f:
-    f = f[f["area_cluster"].isin(area_f)]
-if tier_f:
-    f = f[f["tier"].isin(tier_f)]
-if craft_f:
-    f = f[f["type_or_craft"].isin(craft_f)]
-if status_f:
-    f = f[f["status"].isin(status_f)]
-if q:
-    ql = q.strip().lower()
-    hay = (f["name"].fillna("") + " || " + f["address"].fillna("") + " || "
-           + f["memo"].fillna("")).str.lower()
-    f = f[hay.str.contains(ql)]
-
-counts = f["status"].value_counts().to_dict()
-cols = st.columns(len(STATUS_VALUES) + 1)
-cols[0].metric("表示中", len(f))
-for col, s in zip(cols[1:], STATUS_VALUES):
-    col.metric(s, counts.get(s, 0))
+def save_changes(edited: pd.DataFrame, original: pd.DataFrame):
+    orig = original.set_index("place_id")
+    n = 0
+    for _, row in edited.iterrows():
+        pid = row["place_id"]
+        if pid not in orig.index:
+            continue
+        patch = {}
+        for c in EDITABLE:
+            new = None if pd.isna(row.get(c)) else row.get(c)
+            old = orig.at[pid, c]
+            old = None if pd.isna(old) else old
+            if str(new or "") != str(old or ""):
+                patch[c] = new
+        if patch:
+            patch["updated_at"] = pd.Timestamp.utcnow().isoformat()
+            client().table("stores").update(patch).eq("place_id", pid).execute()
+            n += 1
+    return n
 
 
-# --- Google map --------------------------------------------------------------
-def google_map_html(rows, key, scale, height=540):
-    color = {"未訪問": "#e8453c", "訪問済": "#4285F4", "前向き": "#34A853", "断り": "#9AA0A6"}
+# ---- google map (colored, clickable markers) --------------------------------
+def google_map(rows: list[dict], key: str, scale: int, height: int = 460) -> str:
     markers = [{
-        "lat": r["lat"], "lng": r["lng"], "c": color.get(r["status"], "#e8453c"),
-        "t": (f"<div style='font:13px sans-serif;max-width:240px'>"
-              f"<b>{html.escape(str(r['name']))}</b><br>"
+        "lat": r["lat"], "lng": r["lng"], "c": STATUS_RGB.get(r["status"], "#e8453c"),
+        "t": (f"<div style='font:13px sans-serif;max-width:240px'><b>{html.escape(str(r['name']))}</b><br>"
               f"{html.escape(str(r['type_or_craft']))} ・ {html.escape(str(r['area_cluster']))}<br>"
               f"<span style='color:#666'>{html.escape(str(r.get('address') or ''))}</span><br>"
               f"状態: {html.escape(str(r['status']))}</div>"),
     } for r in rows]
+    import json
+    data = json.dumps(markers)
     clat = sum(r["lat"] for r in rows) / len(rows)
     clng = sum(r["lng"] for r in rows) / len(rows)
     return f"""
 <div id="map" style="height:{height}px;width:100%;border-radius:8px"></div>
 <script>
-  const MARKERS = {json.dumps(markers)};
-  function initMap() {{
-    const map = new google.maps.Map(document.getElementById("map"), {{
-      center: {{lat: {clat}, lng: {clng}}}, zoom: 14, mapTypeControl: true,
-      streetViewControl: false, fullscreenControl: true }});
-    const info = new google.maps.InfoWindow();
-    MARKERS.forEach(m => {{
-      const mk = new google.maps.Marker({{position: {{lat: m.lat, lng: m.lng}}, map,
-        icon: {{path: google.maps.SymbolPath.CIRCLE, scale: {scale}, fillColor: m.c,
-                fillOpacity: 1, strokeColor: "#fff", strokeWeight: 1.5}} }});
-      mk.addListener("click", () => {{ info.setContent(m.t); info.open(map, mk); }});
+  const M={data};
+  function initMap(){{
+    const map=new google.maps.Map(document.getElementById("map"),
+      {{center:{{lat:{clat},lng:{clng}}},zoom:14,streetViewControl:false}});
+    const info=new google.maps.InfoWindow();
+    M.forEach(m=>{{
+      const mk=new google.maps.Marker({{position:{{lat:m.lat,lng:m.lng}},map,
+        icon:{{path:google.maps.SymbolPath.CIRCLE,scale:{scale},fillColor:m.c,
+               fillOpacity:1,strokeColor:"#fff",strokeWeight:1.5}}}});
+      mk.addListener("click",()=>{{info.setContent(m.t);info.open(map,mk);}});
     }});
   }}
 </script>
@@ -142,34 +107,82 @@ def google_map_html(rows, key, scale, height=540):
 """
 
 
-st.subheader("地図（Google マップ）")
-mc1, mc2 = st.columns([1, 2])
-unv = mc1.checkbox("未訪問だけ表示", value=True)
-dot = mc2.slider("マーカーの大きさ", 4, 12, 6)
-msrc = f[f["status"] == "未訪問"] if unv else f
-mdf = msrc[["lat", "lng", "name", "type_or_craft", "area_cluster", "status", "address"]]\
-    .dropna(subset=["lat", "lng"]).copy()
-key = st.secrets.get("GOOGLE_MAPS_API_KEY")
-if not len(mdf):
-    st.info("表示できる座標がありません（フィルタを緩めてください）。")
-elif not key:
-    st.warning("GOOGLE_MAPS_API_KEY が未設定です（Streamlit Cloud の Secrets）。")
-else:
-    components.html(google_map_html(mdf.to_dict("records"), key, dot), height=560)
-    st.caption("🔴未訪問 🔵訪問済 🟢前向き ⚪断り｜マーカーをタップで店名・住所を表示。")
+# ---- app --------------------------------------------------------------------
+def main():
+    st.title("🗺️ 訪問先CRM — 個人経営×熟練手技")
+    st.caption("スマホから status・訪問日・メモを編集して保存できます。データは Supabase に保存。")
 
-# --- read-only table ---------------------------------------------------------
-st.subheader("訪問先リスト")
-show = ["priority_rank", "status", "name", "type_or_craft", "tier", "area_cluster",
-        "address", "phone", "website", "independent_confidence", "memo"]
-st.dataframe(
-    f[[c for c in show if c in f.columns]],
-    hide_index=True, use_container_width=True, height=520,
-    column_config={
-        "priority_rank": st.column_config.NumberColumn("順", width="small"),
-        "website": st.column_config.LinkColumn("web"),
-        "phone": st.column_config.TextColumn("電話"),
-    },
-)
-st.caption("閲覧専用。編集・訪問記録はローカル版（Mac の store-crm）で行い、"
-           "`export_snapshot.py` → git push で反映されます。")
+    df = fetch()
+    if df.empty:
+        st.warning("データがありません。Supabase に seed（supabase_seed.sql）を流しましたか？")
+        st.stop()
+
+    # sidebar filters
+    with st.sidebar:
+        st.header("フィルタ")
+        areas = st.multiselect("エリア", sorted(df["area_cluster"].dropna().unique()))
+        crafts = st.multiselect("業種", sorted(df["type_or_craft"].dropna().unique()))
+        tiers = st.multiselect("Tier", sorted(df["tier"].dropna().unique()))
+        stats = st.multiselect("状態", STATUS_VALUES)
+        if st.button("🔄 最新を取得"):
+            st.rerun()
+
+    f = df.copy()
+    if areas:  f = f[f["area_cluster"].isin(areas)]
+    if crafts: f = f[f["type_or_craft"].isin(crafts)]
+    if tiers:  f = f[f["tier"].isin(tiers)]
+    if stats:  f = f[f["status"].isin(stats)]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("表示", len(f))
+    c2.metric("未訪問", int((f["status"] == "未訪問").sum()))
+    c3.metric("前向き", int((f["status"] == "前向き").sum()))
+    c4.metric("訪問済", int((f["status"] == "訪問済").sum()))
+
+    # map
+    key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+    st.subheader("地図")
+    mc1, mc2 = st.columns([1, 2])
+    only_unvisited = mc1.checkbox("未訪問だけ", value=True)
+    dot = mc2.slider("ドット", 2, 12, 5)
+    msrc = f[f["status"] == "未訪問"] if only_unvisited else f
+    msrc = msrc.dropna(subset=["lat", "lng"])
+    if key and len(msrc):
+        st.components.v1.html(google_map(msrc.to_dict("records"), key, dot), height=480)
+        st.caption("🔴未訪問 🔵訪問済 🟢前向き ⚪断り｜ピンをタップで店名・住所")
+    elif not key:
+        st.info("地図には Secrets の GOOGLE_MAPS_API_KEY が必要です。")
+
+    # editable table
+    st.subheader("リスト（編集して保存）")
+    st.caption("status はプルダウン、メモは自由入力。編集後に下の「保存」を押す。")
+    view_cols = ["name", "type_or_craft", "tier", "area_cluster", "status",
+                 "visit_date", "memo", "phone", "address", "independent_confidence", "place_id"]
+    view_cols = [c for c in view_cols if c in f.columns]
+    edited = st.data_editor(
+        f[view_cols],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "name": st.column_config.TextColumn("店名", disabled=True),
+            "type_or_craft": st.column_config.TextColumn("業種", disabled=True),
+            "tier": st.column_config.TextColumn("Tier", disabled=True),
+            "area_cluster": st.column_config.TextColumn("エリア", disabled=True),
+            "status": st.column_config.SelectboxColumn("状態", options=STATUS_VALUES, required=True),
+            "visit_date": st.column_config.TextColumn("訪問日"),
+            "memo": st.column_config.TextColumn("メモ", width="large"),
+            "phone": st.column_config.TextColumn("電話", disabled=True),
+            "address": st.column_config.TextColumn("住所", disabled=True),
+            "independent_confidence": st.column_config.TextColumn("独立度", disabled=True),
+            "place_id": st.column_config.TextColumn("id", disabled=True),
+        },
+        key="editor",
+    )
+    if st.button("💾 保存", type="primary"):
+        n = save_changes(edited, f)
+        st.success(f"{n} 件を保存しました。") if n else st.info("変更はありませんでした。")
+        st.rerun()
+
+
+if gate():
+    main()
