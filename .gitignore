@@ -1,0 +1,8 @@
+# PUBLIC repo — never commit PII or secrets.
+# store list (店名/住所/電話) lives in Streamlit Secrets, not here:
+data/
+# generated secrets block (has PII):
+_secrets_to_paste.txt
+.streamlit/secrets.toml
+__pycache__/
+.venv/
