@@ -12,6 +12,7 @@ from urllib.parse import quote
 import pandas as pd
 import streamlit as st
 from supabase import create_client
+from streamlit_geolocation import streamlit_geolocation
 
 STATUS_VALUES = ["未訪問", "訪問済", "前向き", "断り"]
 
@@ -86,7 +87,8 @@ def save_changes(edited: pd.DataFrame, original: pd.DataFrame):
 
 
 # ---- google map (colored, clickable markers) --------------------------------
-def google_map(rows: list[dict], key: str, scale: int, height: int = 460) -> str:
+def google_map(rows: list[dict], key: str, scale: int, me: dict | None = None,
+               height: int = 460) -> str:
     markers = [{
         "lat": r["lat"], "lng": r["lng"], "c": STATUS_RGB.get(r["status"], "#e8453c"),
         "t": (f"<div style='font:13px sans-serif;max-width:250px;line-height:1.5'>"
@@ -100,8 +102,10 @@ def google_map(rows: list[dict], key: str, scale: int, height: int = 460) -> str
     } for r in rows]
     import json
     data = json.dumps(markers)
-    clat = sum(r["lat"] for r in rows) / len(rows)
-    clng = sum(r["lng"] for r in rows) / len(rows)
+    me_js = json.dumps(me) if me else "null"
+    # center on the user if we have their location, else on the stores
+    clat = me["lat"] if me else sum(r["lat"] for r in rows) / len(rows)
+    clng = me["lng"] if me else sum(r["lng"] for r in rows) / len(rows)
     return f"""
 <div id="map" style="height:{height}px;width:100%;border-radius:8px"></div>
 <div id="geo" style="font:12px sans-serif;color:#888;margin-top:4px"></div>
@@ -118,48 +122,27 @@ def google_map(rows: list[dict], key: str, scale: int, height: int = 460) -> str
       mk.addListener("click",()=>{{info.setContent(m.t);info.open(map,mk);}});
     }});
 
-    // ---- current location (blue dot + accuracy circle + live tracking) ----
+    // ---- current location: coords come from Python (streamlit_geolocation),
+    //      because this map iframe itself is not allowed to call geolocation ----
     const geo=document.getElementById("geo");
-    let meDot=null, meRing=null, mePos=null;
-    function showMe(pos){{
-      const p={{lat:pos.coords.latitude,lng:pos.coords.longitude}};
-      mePos=p;
-      const acc=pos.coords.accuracy||30;
-      if(!meDot){{
-        meDot=new google.maps.Marker({{position:p,map,zIndex:9999,title:"現在地",
-          icon:{{path:google.maps.SymbolPath.CIRCLE,scale:7,fillColor:"#4285F4",
-                 fillOpacity:1,strokeColor:"#fff",strokeWeight:3}}}});
-        meRing=new google.maps.Circle({{map,center:p,radius:acc,fillColor:"#4285F4",
-          fillOpacity:0.12,strokeColor:"#4285F4",strokeOpacity:0.35,strokeWeight:1}});
-        map.setCenter(p);
-      }} else {{ meDot.setPosition(p); meRing.setCenter(p); meRing.setRadius(acc); }}
+    const ME={me_js};
+    if(ME && ME.lat!=null){{
+      const p={{lat:ME.lat,lng:ME.lng}};
+      new google.maps.Marker({{position:p,map,zIndex:9999,title:"現在地",
+        icon:{{path:google.maps.SymbolPath.CIRCLE,scale:7,fillColor:"#4285F4",
+               fillOpacity:1,strokeColor:"#fff",strokeWeight:3}}}});
+      new google.maps.Circle({{map,center:p,radius:(ME.acc||30),fillColor:"#4285F4",
+        fillOpacity:0.12,strokeColor:"#4285F4",strokeOpacity:0.35,strokeWeight:1}});
+      const btn=document.createElement("button");
+      btn.textContent="📍 現在地へ";
+      btn.style.cssText="margin:8px;padding:8px 12px;border:none;border-radius:6px;"
+        +"background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3);font:13px sans-serif;cursor:pointer";
+      btn.onclick=()=>{{ map.setCenter(p); map.setZoom(16); }};
+      map.controls[google.maps.ControlPosition.TOP_RIGHT].push(btn);
       geo.textContent="現在地を表示中（青い点）";
+    }} else {{
+      geo.textContent="現在地を出すには、地図の上の「📍位置情報」ボタンを押して許可してください。";
     }}
-    function geoErr(e){{ geo.textContent="現在地を取得できません（"+e.message+"）。ブラウザ/端末の位置情報を許可してください。"; }}
-    const opt={{enableHighAccuracy:true,maximumAge:5000,timeout:15000}};
-    let watching=false;
-    function locate(){{  // called on user tap → reliably triggers the permission prompt (mobile)
-      if(!navigator.geolocation){{ geo.textContent="この端末は位置情報に対応していません。"; return; }}
-      geo.textContent="現在地を取得中…（プロンプトが出たら「許可」）";
-      navigator.geolocation.getCurrentPosition(p=>{{
-        showMe(p); map.setCenter(mePos); map.setZoom(16);
-        if(!watching){{ watching=true; navigator.geolocation.watchPosition(showMe,geoErr,opt); }}
-      }}, geoErr, opt);
-    }}
-
-    // "現在地" button — tap to locate & recenter (tap = user gesture the prompt needs)
-    const btn=document.createElement("button");
-    btn.textContent="📍 現在地";
-    btn.style.cssText="margin:8px;padding:8px 12px;border:none;border-radius:6px;"
-      +"background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3);font:13px sans-serif;cursor:pointer";
-    btn.onclick=()=>{{ if(mePos){{map.setCenter(mePos);map.setZoom(16);}} else {{ locate(); }} }};
-    map.controls[google.maps.ControlPosition.TOP_RIGHT].push(btn);
-
-    // try once automatically (works on desktop); on mobile the button tap is the reliable path
-    if(navigator.geolocation){{ navigator.geolocation.getCurrentPosition(p=>{{
-      showMe(p); if(!watching){{ watching=true; navigator.geolocation.watchPosition(showMe,geoErr,opt); }}
-    }}, geoErr, opt); }}
-    geo.textContent="現在地を出すには右上の「📍 現在地」をタップ→「許可」。";
   }}
 </script>
 <script async src="https://maps.googleapis.com/maps/api/js?key={key}&callback=initMap&language=ja&region=JP"></script>
@@ -201,14 +184,24 @@ def main():
     # map
     key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
     st.subheader("地図")
+
+    # current location — obtained OUTSIDE the map iframe (this component is allowed
+    # to prompt for geolocation, the raw html() map iframe is not). Tap → allow.
+    st.caption("現在地を地図に出す→ 下のアイコンを押して「許可」")
+    gl = streamlit_geolocation()
+    if gl and gl.get("latitude") is not None:
+        st.session_state["me"] = {"lat": gl["latitude"], "lng": gl["longitude"],
+                                  "acc": gl.get("accuracy") or 30}
+    me = st.session_state.get("me")
+
     mc1, mc2 = st.columns([1, 2])
     only_unvisited = mc1.checkbox("未訪問だけ", value=True)
     dot = mc2.slider("ドット", 2, 12, 5)
     msrc = f[f["status"] == "未訪問"] if only_unvisited else f
     msrc = msrc.dropna(subset=["lat", "lng"])
     if key and len(msrc):
-        st.components.v1.html(google_map(msrc.to_dict("records"), key, dot), height=480)
-        st.caption("🔴未訪問 🔵訪問済 🟢前向き ⚪断り｜ピンをタップで店名・住所")
+        st.components.v1.html(google_map(msrc.to_dict("records"), key, dot, me=me), height=480)
+        st.caption("🔴未訪問 🔵訪問済 🟢前向き ⚪断り｜青=現在地｜ピンをタップで店名・住所")
     elif not key:
         st.info("地図には Secrets の GOOGLE_MAPS_API_KEY が必要です。")
 
