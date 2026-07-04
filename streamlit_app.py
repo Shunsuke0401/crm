@@ -135,21 +135,31 @@ def google_map(rows: list[dict], key: str, scale: int, height: int = 460) -> str
       }} else {{ meDot.setPosition(p); meRing.setCenter(p); meRing.setRadius(acc); }}
       geo.textContent="現在地を表示中（青い点）";
     }}
-    function geoErr(e){{ geo.textContent="現在地を取得できません（位置情報の許可が必要）: "+e.message; }}
+    function geoErr(e){{ geo.textContent="現在地を取得できません（"+e.message+"）。ブラウザ/端末の位置情報を許可してください。"; }}
+    const opt={{enableHighAccuracy:true,maximumAge:5000,timeout:15000}};
+    let watching=false;
+    function locate(){{  // called on user tap → reliably triggers the permission prompt (mobile)
+      if(!navigator.geolocation){{ geo.textContent="この端末は位置情報に対応していません。"; return; }}
+      geo.textContent="現在地を取得中…（プロンプトが出たら「許可」）";
+      navigator.geolocation.getCurrentPosition(p=>{{
+        showMe(p); map.setCenter(mePos); map.setZoom(16);
+        if(!watching){{ watching=true; navigator.geolocation.watchPosition(showMe,geoErr,opt); }}
+      }}, geoErr, opt);
+    }}
 
-    // recenter button
+    // "現在地" button — tap to locate & recenter (tap = user gesture the prompt needs)
     const btn=document.createElement("button");
     btn.textContent="📍 現在地";
     btn.style.cssText="margin:8px;padding:8px 12px;border:none;border-radius:6px;"
       +"background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3);font:13px sans-serif;cursor:pointer";
-    btn.onclick=()=>{{ if(mePos){{map.setCenter(mePos);map.setZoom(16);}} }};
+    btn.onclick=()=>{{ if(mePos){{map.setCenter(mePos);map.setZoom(16);}} else {{ locate(); }} }};
     map.controls[google.maps.ControlPosition.TOP_RIGHT].push(btn);
 
-    if(navigator.geolocation){{
-      const opt={{enableHighAccuracy:true,maximumAge:5000,timeout:10000}};
-      navigator.geolocation.getCurrentPosition(showMe,geoErr,opt);
-      navigator.geolocation.watchPosition(showMe,geoErr,opt);
-    }} else {{ geo.textContent="この端末は位置情報に対応していません。"; }}
+    // try once automatically (works on desktop); on mobile the button tap is the reliable path
+    if(navigator.geolocation){{ navigator.geolocation.getCurrentPosition(p=>{{
+      showMe(p); if(!watching){{ watching=true; navigator.geolocation.watchPosition(showMe,geoErr,opt); }}
+    }}, geoErr, opt); }}
+    geo.textContent="現在地を出すには右上の「📍 現在地」をタップ→「許可」。";
   }}
 </script>
 <script async src="https://maps.googleapis.com/maps/api/js?key={key}&callback=initMap&language=ja&region=JP"></script>
