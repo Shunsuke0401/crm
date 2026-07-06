@@ -229,13 +229,10 @@ def main():
         f = f.copy()
         f["_dist"] = f.apply(_dkm, axis=1)
         f = f.sort_values("_dist", na_position="last")
-        f["距離"] = f["_dist"].apply(
-            lambda x: "" if x is None else
-            (f"約{int(round(x * 1000 / 50) * 50)}m" if x < 1 else f"約{x:.1f}km"))
         st.caption("**現在地から近い順**に並んでいます。状態セルで選択→「保存」。住所は📍でマップ。")
     else:
         st.caption("状態セルをタップ→選択。（地図の📍で現在地を許可すると『近い順』に並びます）")
-    view_cols = ["name", "距離", "owner_name", "owner_kana", "status", "visit_date", "memo",
+    view_cols = ["name", "owner_name", "owner_kana", "status", "visit_date", "memo",
                  "type_or_craft", "tier", "area_cluster", "map_url", "phone",
                  "independent_confidence", "place_id"]
     view_cols = [c for c in view_cols if c in f.columns]
@@ -246,7 +243,6 @@ def main():
         column_order=view_cols,
         column_config={
             "name": st.column_config.TextColumn("店名", disabled=True),
-            "距離": st.column_config.TextColumn("距離", disabled=True, width="small"),
             "owner_name": st.column_config.TextColumn("店主", disabled=True),
             "owner_kana": st.column_config.TextColumn("ふりがな", disabled=True),
             "status": st.column_config.SelectboxColumn(
