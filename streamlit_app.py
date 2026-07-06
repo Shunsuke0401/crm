@@ -57,7 +57,7 @@ def fetch() -> pd.DataFrame:
     for c in ("lat", "lng"):
         if c in df:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-    for c in EDITABLE:
+    for c in (*EDITABLE, "owner_name", "owner_kana"):
         if c not in df:
             df[c] = None
     if not df.empty:
@@ -93,6 +93,9 @@ def google_map(rows: list[dict], key: str, scale: int, me: dict | None = None,
         "lat": r["lat"], "lng": r["lng"], "c": STATUS_RGB.get(r["status"], "#e8453c"),
         "t": (f"<div style='font:13px sans-serif;max-width:250px;line-height:1.5'>"
               f"<b>{html.escape(str(r['name']))}</b><br>"
+              + (f"店主: {html.escape(str(r.get('owner_name')))}"
+                 + (f"（{html.escape(str(r.get('owner_kana')))}）" if r.get('owner_kana') else "")
+                 + "<br>" if r.get('owner_name') else "") +
               f"Type: {html.escape(str(r['type_or_craft']))}<br>"
               f"エリア: {html.escape(str(r['area_cluster']))}<br>"
               f"状態: {html.escape(str(r['status']))}<br>"
@@ -208,8 +211,9 @@ def main():
     # editable table
     st.subheader("リスト（編集して保存）")
     st.caption("**状態**セルをタップ→プルダウンで選択。住所は📍でGoogleマップが開く。編集後に「保存」。")
-    view_cols = ["name", "status", "visit_date", "memo", "type_or_craft", "tier",
-                 "area_cluster", "map_url", "phone", "independent_confidence", "place_id"]
+    view_cols = ["name", "owner_name", "owner_kana", "status", "visit_date", "memo",
+                 "type_or_craft", "tier", "area_cluster", "map_url", "phone",
+                 "independent_confidence", "place_id"]
     view_cols = [c for c in view_cols if c in f.columns]
     edited = st.data_editor(
         f[view_cols],
@@ -218,6 +222,8 @@ def main():
         column_order=view_cols,
         column_config={
             "name": st.column_config.TextColumn("店名", disabled=True),
+            "owner_name": st.column_config.TextColumn("店主", disabled=True),
+            "owner_kana": st.column_config.TextColumn("ふりがな", disabled=True),
             "status": st.column_config.SelectboxColumn(
                 "状態", options=STATUS_VALUES, required=True, width="small"),
             "visit_date": st.column_config.TextColumn("訪問日"),
