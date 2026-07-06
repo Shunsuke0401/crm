@@ -14,7 +14,15 @@ import streamlit as st
 from supabase import create_client
 from streamlit_geolocation import streamlit_geolocation
 
-STATUS_VALUES = ["未訪問", "訪問済", "前向き", "断り"]
+STATUS_VALUES = ["未訪問", "訪問済", "前向き", "確定", "断り"]
+
+
+def haversine_km(a_lat, a_lng, b_lat, b_lng):
+    from math import radians, sin, cos, asin, sqrt
+    p1, p2 = radians(a_lat), radians(b_lat)
+    dp, dl = radians(b_lat - a_lat), radians(b_lng - a_lng)
+    h = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
+    return 2 * 6371 * asin(sqrt(h))
 
 
 def maps_link(name, place_id) -> str:
@@ -24,7 +32,8 @@ def maps_link(name, place_id) -> str:
     if pid:
         return f"https://www.google.com/maps/search/?api=1&query={q}&query_place_id={pid}"
     return f"https://www.google.com/maps/search/?api=1&query={q}"
-STATUS_RGB = {"未訪問": "#e8453c", "訪問済": "#4285F4", "前向き": "#34A853", "断り": "#9AA0A6"}
+STATUS_RGB = {"未訪問": "#e8453c", "訪問済": "#4285F4", "前向き": "#34A853",
+              "確定": "#F9AB00", "断り": "#9AA0A6"}
 EDITABLE = ["status", "visit_date", "memo"]
 
 st.set_page_config(page_title="訪問先CRM", page_icon="🗺️", layout="wide")
@@ -204,14 +213,29 @@ def main():
     msrc = msrc.dropna(subset=["lat", "lng"])
     if key and len(msrc):
         st.components.v1.html(google_map(msrc.to_dict("records"), key, dot, me=me), height=480)
-        st.caption("🔴未訪問 🔵訪問済 🟢前向き ⚪断り｜青=現在地｜ピンをタップで店名・住所")
+        st.caption("🔴未訪問 🔵訪問済 🟢前向き 🟡確定 ⚪断り｜青=現在地｜ピンをタップで店名・住所")
     elif not key:
         st.info("地図には Secrets の GOOGLE_MAPS_API_KEY が必要です。")
 
-    # editable table
+    # editable table — sort by rough distance from current location (nearest first)
     st.subheader("リスト（編集して保存）")
-    st.caption("**状態**セルをタップ→プルダウンで選択。住所は📍でGoogleマップが開く。編集後に「保存」。")
-    view_cols = ["name", "owner_name", "owner_kana", "status", "visit_date", "memo",
+    has_loc = bool(me and me.get("lat") is not None)
+    if has_loc:
+        def _dkm(r):
+            try:
+                return haversine_km(me["lat"], me["lng"], float(r["lat"]), float(r["lng"]))
+            except Exception:
+                return None
+        f = f.copy()
+        f["_dist"] = f.apply(_dkm, axis=1)
+        f = f.sort_values("_dist", na_position="last")
+        f["距離"] = f["_dist"].apply(
+            lambda x: "" if x is None else
+            (f"約{int(round(x * 1000 / 50) * 50)}m" if x < 1 else f"約{x:.1f}km"))
+        st.caption("**現在地から近い順**に並んでいます。状態セルで選択→「保存」。住所は📍でマップ。")
+    else:
+        st.caption("状態セルをタップ→選択。（地図の📍で現在地を許可すると『近い順』に並びます）")
+    view_cols = ["name", "距離", "owner_name", "owner_kana", "status", "visit_date", "memo",
                  "type_or_craft", "tier", "area_cluster", "map_url", "phone",
                  "independent_confidence", "place_id"]
     view_cols = [c for c in view_cols if c in f.columns]
@@ -222,6 +246,7 @@ def main():
         column_order=view_cols,
         column_config={
             "name": st.column_config.TextColumn("店名", disabled=True),
+            "距離": st.column_config.TextColumn("距離", disabled=True, width="small"),
             "owner_name": st.column_config.TextColumn("店主", disabled=True),
             "owner_kana": st.column_config.TextColumn("ふりがな", disabled=True),
             "status": st.column_config.SelectboxColumn(
