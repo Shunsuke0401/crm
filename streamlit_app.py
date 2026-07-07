@@ -66,7 +66,7 @@ def fetch() -> pd.DataFrame:
     for c in ("lat", "lng"):
         if c in df:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-    for c in (*EDITABLE, "owner_name", "owner_kana"):
+    for c in (*EDITABLE, "owner_name", "owner_kana", "category"):
         if c not in df:
             df[c] = None
     if not df.empty:
@@ -174,6 +174,7 @@ def main():
     # sidebar filters
     with st.sidebar:
         st.header("フィルタ")
+        cat = st.radio("分類", ["すべて", "飲食", "その他"], horizontal=True)
         areas = st.multiselect("エリア", sorted(df["area_cluster"].dropna().unique()))
         crafts = st.multiselect("業種", sorted(df["type_or_craft"].dropna().unique()))
         tiers = st.multiselect("Tier", sorted(df["tier"].dropna().unique()))
@@ -182,6 +183,8 @@ def main():
             st.rerun()
 
     f = df.copy()
+    if cat != "すべて" and "category" in f:
+        f = f[f["category"] == cat]
     if areas:  f = f[f["area_cluster"].isin(areas)]
     if crafts: f = f[f["type_or_craft"].isin(crafts)]
     if tiers:  f = f[f["tier"].isin(tiers)]
@@ -233,7 +236,7 @@ def main():
     else:
         st.caption("状態セルをタップ→選択。（地図の📍で現在地を許可すると『近い順』に並びます）")
     view_cols = ["name", "owner_name", "owner_kana", "status", "visit_date", "memo",
-                 "type_or_craft", "tier", "area_cluster", "map_url", "phone",
+                 "category", "type_or_craft", "tier", "area_cluster", "map_url", "phone",
                  "independent_confidence", "place_id"]
     view_cols = [c for c in view_cols if c in f.columns]
     edited = st.data_editor(
@@ -249,7 +252,8 @@ def main():
                 "状態", options=STATUS_VALUES, required=True, width="small"),
             "visit_date": st.column_config.TextColumn("訪問日"),
             "memo": st.column_config.TextColumn("メモ", width="large"),
-            "type_or_craft": st.column_config.TextColumn("Type", disabled=True),
+            "category": st.column_config.TextColumn("分類", disabled=True, width="small"),
+            "type_or_craft": st.column_config.TextColumn("業種", disabled=True),
             "tier": st.column_config.TextColumn("Tier", disabled=True),
             "area_cluster": st.column_config.TextColumn("エリア", disabled=True),
             "map_url": st.column_config.LinkColumn(
