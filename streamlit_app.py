@@ -455,24 +455,44 @@ def _meishi_intake_section():
             key="meishi_editor",
         )
         c1, c2 = st.columns(2)
+        st.caption(
+            "⚠️ 抽出しただけでは保存されません。上の表を確認して、この下のボタンを押してください。"
+        )
         if c1.button("💾 全部を people に保存", type="primary", key="meishi_save"):
-            n = 0
-            for _, row in edited.iterrows():
+            saved = 0
+            skipped = 0
+            errors: list[str] = []
+            for i, (_, row) in enumerate(edited.iterrows()):
                 rd = row.to_dict()
-                if not rd.get("name"):
+                name = rd.get("name")
+                if name is None or (isinstance(name, float) and pd.isna(name)) or str(name).strip() == "":
+                    skipped += 1
                     continue
-                payload = {}
+                payload: dict = {}
                 for k in db.PEOPLE_EDITABLE:
-                    v = rd.get(k)
-                    if pd.notna(v) and v not in ("", None):
-                        payload[k] = v
+                    if k not in rd:
+                        continue
+                    payload[k] = rd[k]
                 payload.setdefault("status", "active")
                 payload.setdefault("source", "名刺スキャン")
-                db.insert_person(payload)
-                n += 1
-            st.success(f"{n} 件を people に保存しました。")
-            st.session_state.pop("meishi_draft", None)
-            st.rerun()
+                try:
+                    db.insert_person(payload)
+                    saved += 1
+                except Exception as e:
+                    errors.append(f"row {i} ({name}): {e}")
+            if saved:
+                st.success(f"✅ {saved} 件を people に保存しました。" +
+                           (f" (skip {skipped} 件)" if skipped else ""))
+            elif not errors:
+                st.warning(
+                    f"保存されませんでした。全 {len(edited)} 行が氏名なしでスキップ ({skipped} 件)。"
+                )
+            for msg in errors:
+                st.error(f"保存失敗: {msg}")
+            if saved and not errors:
+                st.session_state.pop("meishi_draft", None)
+                st.rerun()
+            # エラー時は rerun しない = 画面にエラーを残す
         if c2.button("🗑️ ドラフトを破棄", key="meishi_discard"):
             st.session_state.pop("meishi_draft", None)
             st.rerun()

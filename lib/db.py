@@ -15,6 +15,39 @@ def client() -> Client:
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 
+def _py(v):
+    """numpy / pandas scalar → Python native (Supabase-py の JSON 送信対応)。
+
+    pd.NA / numpy int64 / numpy float / date 等が JSON 直列化できず silent fail
+    するのを回避する。dict/list はそのまま返す。
+    """
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(v, "item"):
+        return v.item()
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    return v
+
+
+def _clean(row: dict, drop_keys: tuple[str, ...] = ("id",)) -> dict:
+    """dict の各値を _py() で pythonize + 指定キー除外 + None/空文字除外。"""
+    out = {}
+    for k, v in row.items():
+        if k in drop_keys:
+            continue
+        pv = _py(v)
+        if pv is None or pv == "":
+            continue
+        out[k] = pv
+    return out
+
+
 # ---- stores (職人) -----------------------------------------------------------
 STORE_STATUS_VALUES = ["未訪問", "訪問済", "前向き", "確定", "断り"]
 STORE_EDITABLE = ["status", "visit_date", "memo"]
@@ -62,9 +95,10 @@ def fetch_ai_contacts() -> pd.DataFrame:
 
 def upsert_ai_contact(row: dict) -> dict:
     """id があれば update、なければ insert。"""
-    payload = {k: (None if pd.isna(v) else v) for k, v in row.items() if k != "id"}
-    if row.get("id"):
-        return client().table("ai_contacts").update(payload).eq("id", int(row["id"])).execute().data[0]
+    payload = _clean(row)
+    rid = _py(row.get("id"))
+    if rid:
+        return client().table("ai_contacts").update(payload).eq("id", int(rid)).execute().data[0]
     return client().table("ai_contacts").insert(payload).execute().data[0]
 
 
@@ -91,14 +125,15 @@ def fetch_people() -> pd.DataFrame:
 
 
 def upsert_person(row: dict) -> dict:
-    payload = {k: (None if pd.isna(v) else v) for k, v in row.items() if k != "id"}
-    if row.get("id"):
-        return client().table("people").update(payload).eq("id", int(row["id"])).execute().data[0]
+    payload = _clean(row)
+    rid = _py(row.get("id"))
+    if rid:
+        return client().table("people").update(payload).eq("id", int(rid)).execute().data[0]
     return client().table("people").insert(payload).execute().data[0]
 
 
 def insert_person(row: dict) -> dict:
-    payload = {k: (None if pd.isna(v) else v) for k, v in row.items() if k not in ("id",)}
+    payload = _clean(row)
     return client().table("people").insert(payload).execute().data[0]
 
 
