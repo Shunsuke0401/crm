@@ -51,7 +51,13 @@ AI_EDITABLE = [
 
 def fetch_ai_contacts() -> pd.DataFrame:
     rows = client().table("ai_contacts").select("*").order("id").execute().data
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        # st.data_editor の型互換チェックのため nullable Int64 に統一
+        if "id" in df:
+            df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+        # DateColumn は文字列を受け付けないので TextColumn 側で扱う想定=そのまま文字列で残す
+    return df
 
 
 def upsert_ai_contact(row: dict) -> dict:
@@ -76,7 +82,12 @@ PEOPLE_EDITABLE = [
 
 def fetch_people() -> pd.DataFrame:
     rows = client().table("people").select("*").order("id", desc=True).execute().data
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        for c in ("id", "related_ai_contact_id"):
+            if c in df:
+                df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+    return df
 
 
 def upsert_person(row: dict) -> dict:

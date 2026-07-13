@@ -332,7 +332,7 @@ def render_ai_tab():
             "linkedin_url":  st.column_config.LinkColumn("LinkedIn"),
             "website":       st.column_config.LinkColumn("website"),
             "source":        st.column_config.TextColumn("source"),
-            "last_contact_date": st.column_config.DateColumn("最終接触"),
+            "last_contact_date": st.column_config.TextColumn("最終接触", help="YYYY-MM-DD"),
             "notes":         st.column_config.TextColumn("notes", width="large"),
         },
         key="ai_editor",
@@ -409,6 +409,11 @@ def _meishi_intake_section():
                   "related_store_place_id", "related_ai_contact_id", "memo", "source"]:
             if c not in draft_df.columns:
                 draft_df[c] = None
+        # NumberColumn の型互換 (nullable Int64) に揃える
+        if "related_ai_contact_id" in draft_df:
+            draft_df["related_ai_contact_id"] = pd.to_numeric(
+                draft_df["related_ai_contact_id"], errors="coerce"
+            ).astype("Int64")
         edited = st.data_editor(
             draft_df,
             hide_index=True,
