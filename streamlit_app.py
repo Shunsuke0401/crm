@@ -399,10 +399,11 @@ def _meishi_intake_section():
     can_extract = bool(uploads) and bool(gemini_key)
     btn_label = f"🤖 {len(uploads)} 枚をまとめて抽出" if uploads else "🤖 抽出する"
     if st.button(btn_label, type="primary", disabled=not can_extract, key="meishi_extract"):
-        with st.spinner(f"{len(uploads)} 枚を Gemini で解析中..."):
+        model_name = st.secrets.get("GEMINI_MODEL", gemini.MODEL_DEFAULT)
+        with st.spinner(f"{len(uploads)} 枚を Gemini ({model_name}) で解析中..."):
             images = [u.read() for u in uploads]
             try:
-                extracted = gemini.extract_meishi_batch(gemini_key, images)
+                extracted = gemini.extract_meishi_batch(gemini_key, images, model=model_name)
             except Exception as e:
                 st.error(f"抽出失敗: {e}")
                 extracted = []

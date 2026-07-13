@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
-MODEL_DEFAULT = "gemini-2.5-flash"
+MODEL_DEFAULT = "gemini-3.5-flash"
 
 # JSON schema (OpenAPI style, Gemini structured output)
 MEISHI_SCHEMA = {
