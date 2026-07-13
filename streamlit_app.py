@@ -1,45 +1,32 @@
-"""
-訪問先CRM（ホスト版・スマホから編集可）— Supabase(Postgres) バックエンド。
-- データは Supabase に永続（再起動で消えない・複数端末で共有）。
-- status / 訪問日 / メモ をこの画面から編集→保存。
-- Secrets: SUPABASE_URL, SUPABASE_KEY, GOOGLE_MAPS_API_KEY, APP_PASSWORD(任意)
+"""Minamoto 統括CRM — 3 タブ (AI / 職人 / 統括=名刺) を単一 Streamlit アプリで。
+
+- Supabase(Postgres) バックエンド。
+- 職人シートは 502 件・既存挙動を保全（フィルタは sidebar → 各タブ内 expander へ）。
+- AI (ai_contacts) と 統括 (people) は Excel 風 data_editor + 個別追加フォーム。
+- 名刺インテークは Gemini 2.5 Flash に複数枚を一括投入 → 抽出 → レビュー → 保存。
+
+Secrets:
+  SUPABASE_URL, SUPABASE_KEY, GOOGLE_MAPS_API_KEY, GEMINI_API_KEY, APP_PASSWORD(任意)
 """
 from __future__ import annotations
 
 import html
+import json
 from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
-from supabase import create_client
 from streamlit_geolocation import streamlit_geolocation
 
-STATUS_VALUES = ["未訪問", "訪問済", "前向き", "確定", "断り"]
+from lib import db, gemini
 
-
-def haversine_km(a_lat, a_lng, b_lat, b_lng):
-    from math import radians, sin, cos, asin, sqrt
-    p1, p2 = radians(a_lat), radians(b_lat)
-    dp, dl = radians(b_lat - a_lat), radians(b_lng - a_lng)
-    h = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
-    return 2 * 6371 * asin(sqrt(h))
-
-
-def maps_link(name, place_id) -> str:
-    """Google Maps URL that opens the exact business (by place_id)."""
-    q = quote(str(name or ""))
-    pid = str(place_id or "")
-    if pid:
-        return f"https://www.google.com/maps/search/?api=1&query={q}&query_place_id={pid}"
-    return f"https://www.google.com/maps/search/?api=1&query={q}"
 STATUS_RGB = {"未訪問": "#e8453c", "訪問済": "#4285F4", "前向き": "#34A853",
               "確定": "#F9AB00", "断り": "#9AA0A6"}
-EDITABLE = ["status", "visit_date", "memo"]
 
-st.set_page_config(page_title="訪問先CRM", page_icon="🗺️", layout="wide")
+st.set_page_config(page_title="Minamoto 統括CRM", page_icon="📇", layout="wide")
 
 
-# ---- optional password gate -------------------------------------------------
+# ---- shared -----------------------------------------------------------------
 def gate() -> bool:
     pw = st.secrets.get("APP_PASSWORD", "")
     if not pw:
@@ -55,47 +42,23 @@ def gate() -> bool:
     return False
 
 
-@st.cache_resource
-def client():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+def haversine_km(a_lat, a_lng, b_lat, b_lng):
+    from math import radians, sin, cos, asin, sqrt
+    p1, p2 = radians(a_lat), radians(b_lat)
+    dp, dl = radians(b_lat - a_lat), radians(b_lng - a_lng)
+    h = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
+    return 2 * 6371 * asin(sqrt(h))
 
 
-def fetch() -> pd.DataFrame:
-    rows = client().table("stores").select("*").order("priority_rank").execute().data
-    df = pd.DataFrame(rows)
-    for c in ("lat", "lng"):
-        if c in df:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    for c in (*EDITABLE, "owner_name", "owner_kana", "category"):
-        if c not in df:
-            df[c] = None
-    if not df.empty:
-        df["map_url"] = df.apply(lambda r: maps_link(r.get("name"), r.get("place_id")), axis=1)
-    return df
+def maps_link(name, place_id) -> str:
+    q = quote(str(name or ""))
+    pid = str(place_id or "")
+    if pid:
+        return f"https://www.google.com/maps/search/?api=1&query={q}&query_place_id={pid}"
+    return f"https://www.google.com/maps/search/?api=1&query={q}"
 
 
-def save_changes(edited: pd.DataFrame, original: pd.DataFrame):
-    orig = original.set_index("place_id")
-    n = 0
-    for _, row in edited.iterrows():
-        pid = row["place_id"]
-        if pid not in orig.index:
-            continue
-        patch = {}
-        for c in EDITABLE:
-            new = None if pd.isna(row.get(c)) else row.get(c)
-            old = orig.at[pid, c]
-            old = None if pd.isna(old) else old
-            if str(new or "") != str(old or ""):
-                patch[c] = new
-        if patch:
-            patch["updated_at"] = pd.Timestamp.utcnow().isoformat()
-            client().table("stores").update(patch).eq("place_id", pid).execute()
-            n += 1
-    return n
-
-
-# ---- google map (colored, clickable markers) --------------------------------
+# ---- Tab 1: 職人 (stores) ---------------------------------------------------
 def google_map(rows: list[dict], key: str, scale: int, me: dict | None = None,
                height: int = 460) -> str:
     markers = [{
@@ -112,10 +75,8 @@ def google_map(rows: list[dict], key: str, scale: int, me: dict | None = None,
               f"<a href='{html.escape(maps_link(r.get('name'), r.get('place_id')))}' "
               f"target='_blank' rel='noopener'>📍 Googleマップで開く</a></div>"),
     } for r in rows]
-    import json
     data = json.dumps(markers)
     me_js = json.dumps(me) if me else "null"
-    # center on the user if we have their location, else on the stores
     clat = me["lat"] if me else sum(r["lat"] for r in rows) / len(rows)
     clng = me["lng"] if me else sum(r["lng"] for r in rows) / len(rows)
     return f"""
@@ -133,9 +94,6 @@ def google_map(rows: list[dict], key: str, scale: int, me: dict | None = None,
                fillOpacity:1,strokeColor:"#fff",strokeWeight:1.5}}}});
       mk.addListener("click",()=>{{info.setContent(m.t);info.open(map,mk);}});
     }});
-
-    // ---- current location: coords come from Python (streamlit_geolocation),
-    //      because this map iframe itself is not allowed to call geolocation ----
     const geo=document.getElementById("geo");
     const ME={me_js};
     if(ME && ME.lat!=null){{
@@ -161,25 +119,43 @@ def google_map(rows: list[dict], key: str, scale: int, me: dict | None = None,
 """
 
 
-# ---- app --------------------------------------------------------------------
-def main():
-    st.title("🗺️ 訪問先CRM — 個人経営×熟練手技")
+def _save_store_changes(edited: pd.DataFrame, original: pd.DataFrame) -> int:
+    orig = original.set_index("place_id")
+    n = 0
+    for _, row in edited.iterrows():
+        pid = row["place_id"]
+        if pid not in orig.index:
+            continue
+        patch = {}
+        for c in db.STORE_EDITABLE:
+            new = None if pd.isna(row.get(c)) else row.get(c)
+            old = orig.at[pid, c]
+            old = None if pd.isna(old) else old
+            if str(new or "") != str(old or ""):
+                patch[c] = new
+        if patch:
+            db.update_store(pid, patch)
+            n += 1
+    return n
+
+
+def render_stores_tab():
     st.caption("スマホから status・訪問日・メモを編集して保存できます。データは Supabase に保存。")
 
-    df = fetch()
+    df = db.fetch_stores()
     if df.empty:
         st.warning("データがありません。Supabase に seed（supabase_seed.sql）を流しましたか？")
-        st.stop()
+        return
 
-    # sidebar filters
-    with st.sidebar:
-        st.header("フィルタ")
-        cat = st.radio("分類", ["すべて", "飲食", "その他"], horizontal=True)
-        areas = st.multiselect("エリア", sorted(df["area_cluster"].dropna().unique()))
-        crafts = st.multiselect("業種", sorted(df["type_or_craft"].dropna().unique()))
-        tiers = st.multiselect("Tier", sorted(df["tier"].dropna().unique()))
-        stats = st.multiselect("状態", STATUS_VALUES)
-        if st.button("🔄 最新を取得"):
+    df["map_url"] = df.apply(lambda r: maps_link(r.get("name"), r.get("place_id")), axis=1)
+
+    with st.expander("🔍 フィルタ", expanded=False):
+        cat = st.radio("分類", ["すべて", "飲食", "その他"], horizontal=True, key="store_cat")
+        areas = st.multiselect("エリア", sorted(df["area_cluster"].dropna().unique()), key="store_areas")
+        crafts = st.multiselect("業種", sorted(df["type_or_craft"].dropna().unique()), key="store_crafts")
+        tiers = st.multiselect("Tier", sorted(df["tier"].dropna().unique()), key="store_tiers")
+        stats = st.multiselect("状態", db.STORE_STATUS_VALUES, key="store_stats")
+        if st.button("🔄 最新を取得", key="store_refresh"):
             st.rerun()
 
     f = df.copy()
@@ -196,12 +172,8 @@ def main():
     c3.metric("前向き", int((f["status"] == "前向き").sum()))
     c4.metric("訪問済", int((f["status"] == "訪問済").sum()))
 
-    # map
     key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
     st.subheader("地図")
-
-    # current location — obtained OUTSIDE the map iframe (this component is allowed
-    # to prompt for geolocation, the raw html() map iframe is not). Tap → allow.
     st.caption("現在地を地図に出す→ 下のアイコンを押して「許可」")
     gl = streamlit_geolocation()
     if gl and gl.get("latitude") is not None:
@@ -210,8 +182,8 @@ def main():
     me = st.session_state.get("me")
 
     mc1, mc2 = st.columns([1, 2])
-    only_unvisited = mc1.checkbox("未訪問だけ", value=True)
-    dot = mc2.slider("ドット", 2, 12, 5)
+    only_unvisited = mc1.checkbox("未訪問だけ", value=True, key="store_unvisited")
+    dot = mc2.slider("ドット", 2, 12, 5, key="store_dot")
     msrc = f[f["status"] == "未訪問"] if only_unvisited else f
     msrc = msrc.dropna(subset=["lat", "lng"])
     if key and len(msrc):
@@ -220,7 +192,6 @@ def main():
     elif not key:
         st.info("地図には Secrets の GOOGLE_MAPS_API_KEY が必要です。")
 
-    # editable table — sort by rough distance from current location (nearest first)
     st.subheader("リスト（編集して保存）")
     has_loc = bool(me and me.get("lat") is not None)
     if has_loc:
@@ -235,6 +206,7 @@ def main():
         st.caption("**現在地から近い順**に並んでいます。状態セルで選択→「保存」。住所は📍でマップ。")
     else:
         st.caption("状態セルをタップ→選択。（地図の📍で現在地を許可すると『近い順』に並びます）")
+
     view_cols = ["name", "owner_name", "owner_kana", "status", "visit_date", "memo",
                  "category", "type_or_craft", "tier", "area_cluster", "map_url", "phone",
                  "independent_confidence", "place_id"]
@@ -249,7 +221,7 @@ def main():
             "owner_name": st.column_config.TextColumn("店主", disabled=True),
             "owner_kana": st.column_config.TextColumn("ふりがな", disabled=True),
             "status": st.column_config.SelectboxColumn(
-                "状態", options=STATUS_VALUES, required=True, width="small"),
+                "状態", options=db.STORE_STATUS_VALUES, required=True, width="small"),
             "visit_date": st.column_config.TextColumn("訪問日"),
             "memo": st.column_config.TextColumn("メモ", width="large"),
             "category": st.column_config.TextColumn("分類", disabled=True, width="small"),
@@ -262,12 +234,338 @@ def main():
             "independent_confidence": st.column_config.TextColumn("独立度", disabled=True),
             "place_id": st.column_config.TextColumn("id", disabled=True),
         },
-        key="editor",
+        key="store_editor",
     )
-    if st.button("💾 保存", type="primary"):
-        n = save_changes(edited, f)
+    if st.button("💾 保存", type="primary", key="store_save"):
+        n = _save_store_changes(edited, f)
         st.success(f"{n} 件を保存しました。") if n else st.info("変更はありませんでした。")
         st.rerun()
+
+
+# ---- Tab 2: AI (ai_contacts / 買い手) ----------------------------------------
+def _save_ai_changes(edited: pd.DataFrame, original: pd.DataFrame) -> tuple[int, int, int]:
+    """(insert, update, delete) の件数を返す。"""
+    orig_by_id = {r["id"]: r for _, r in original.iterrows() if pd.notna(r.get("id"))}
+    edited_ids = {int(r["id"]) for _, r in edited.iterrows() if pd.notna(r.get("id"))}
+    ins = upd = 0
+    for _, row in edited.iterrows():
+        rd = row.to_dict()
+        if pd.isna(rd.get("id")):
+            # new row
+            payload = {k: v for k, v in rd.items() if k in db.AI_EDITABLE and pd.notna(v)}
+            if not payload.get("company"):
+                continue
+            db.upsert_ai_contact(payload)
+            ins += 1
+        else:
+            rid = int(rd["id"])
+            old = orig_by_id.get(rid)
+            if old is None:
+                continue
+            patch = {}
+            for c in db.AI_EDITABLE:
+                new = None if pd.isna(rd.get(c)) else rd.get(c)
+                oldv = None if pd.isna(old.get(c)) else old.get(c)
+                if str(new or "") != str(oldv or ""):
+                    patch[c] = new
+            if patch:
+                patch["id"] = rid
+                db.upsert_ai_contact(patch)
+                upd += 1
+    dels = 0
+    for orig_id in orig_by_id:
+        if orig_id not in edited_ids:
+            db.delete_ai_contact(int(orig_id))
+            dels += 1
+    return ins, upd, dels
+
+
+def render_ai_tab():
+    st.caption("買い手 (AI ラボ / VLA / World Model 等) を会社単位で管理。担当者は 統括タブ (people) で紐付け。")
+
+    df = db.fetch_ai_contacts()
+    if df.empty:
+        st.info("まだ登録された会社がありません。下の表で行を追加してください。")
+
+    with st.expander("🔍 フィルタ", expanded=False):
+        f_status = st.multiselect("状態", db.AI_STATUS_VALUES, key="ai_status")
+        f_field = st.text_input("field 部分一致", "", key="ai_field")
+        if st.button("🔄 最新を取得", key="ai_refresh"):
+            st.rerun()
+
+    f = df.copy()
+    if f_status:
+        f = f[f["status"].isin(f_status)]
+    if f_field and "field" in f:
+        f = f[f["field"].fillna("").str.contains(f_field, case=False, na=False)]
+
+    if not df.empty:
+        cols = st.columns(len(db.AI_STATUS_VALUES) + 1)
+        cols[0].metric("表示", len(f))
+        for i, s in enumerate(db.AI_STATUS_VALUES, start=1):
+            cols[i].metric(s, int((df["status"] == s).sum()))
+
+    view_cols = [
+        "id", "company", "status", "field", "primary_contact_name",
+        "primary_contact_role", "primary_contact_email", "linkedin_url", "website",
+        "source", "last_contact_date", "notes",
+    ]
+    for c in view_cols:
+        if c not in f.columns:
+            f[c] = None
+
+    edited = st.data_editor(
+        f[view_cols],
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_order=view_cols,
+        column_config={
+            "id": st.column_config.NumberColumn("id", disabled=True, width="small"),
+            "company": st.column_config.TextColumn("会社名", required=True),
+            "status": st.column_config.SelectboxColumn(
+                "状態", options=db.AI_STATUS_VALUES, required=True, width="small"),
+            "field": st.column_config.TextColumn("field"),
+            "primary_contact_name":  st.column_config.TextColumn("担当者"),
+            "primary_contact_role":  st.column_config.TextColumn("役職"),
+            "primary_contact_email": st.column_config.TextColumn("email"),
+            "linkedin_url":  st.column_config.LinkColumn("LinkedIn"),
+            "website":       st.column_config.LinkColumn("website"),
+            "source":        st.column_config.TextColumn("source"),
+            "last_contact_date": st.column_config.DateColumn("最終接触"),
+            "notes":         st.column_config.TextColumn("notes", width="large"),
+        },
+        key="ai_editor",
+    )
+    if st.button("💾 保存", type="primary", key="ai_save"):
+        ins, upd, dels = _save_ai_changes(edited, f)
+        parts = []
+        if ins:  parts.append(f"追加 {ins} 件")
+        if upd:  parts.append(f"更新 {upd} 件")
+        if dels: parts.append(f"削除 {dels} 件")
+        st.success("・".join(parts)) if parts else st.info("変更はありませんでした。")
+        st.rerun()
+
+
+# ---- Tab 3: 統括 (people = 名刺) ---------------------------------------------
+def _meishi_intake_section():
+    """複数枚アップロード → Gemini 抽出 → レビュー・修正 → 保存。"""
+    st.subheader("📸 名刺インテーク（画像 → 抽出 → 保存）")
+
+    gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+    if not gemini_key:
+        st.warning(
+            "⚠️ Secrets に GEMINI_API_KEY が設定されていません。"
+            "Google AI Studio で API key を発行し、Streamlit Cloud の Secrets に追加してください。"
+        )
+
+    uploads = st.file_uploader(
+        "名刺画像（複数選択可）",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key="meishi_uploads",
+    )
+
+    # まとめて紐付け（一括で related_store / related_ai_contact を設定）
+    stores_df = db.fetch_stores()
+    ai_df = db.fetch_ai_contacts()
+    store_map = {"（紐付けなし）": None}
+    for _, r in stores_df.iterrows():
+        label = f"{r['name']}（{r.get('area_cluster') or ''}）"
+        store_map[label] = r["place_id"]
+    ai_map = {"（紐付けなし）": None}
+    for _, r in ai_df.iterrows():
+        ai_map[str(r["company"])] = int(r["id"])
+
+    c1, c2 = st.columns(2)
+    linked_store = c1.selectbox("この名刺群 → 職人 (店)", list(store_map.keys()), key="meishi_link_store")
+    linked_ai    = c2.selectbox("この名刺群 → AI (会社)",   list(ai_map.keys()),    key="meishi_link_ai")
+
+    can_extract = bool(uploads) and bool(gemini_key)
+    if st.button("🤖 抽出する", type="primary", disabled=not can_extract, key="meishi_extract"):
+        with st.spinner(f"{len(uploads)} 枚を Gemini で解析中..."):
+            images = [u.read() for u in uploads]
+            try:
+                extracted = gemini.extract_meishi_batch(gemini_key, images)
+            except Exception as e:
+                st.error(f"抽出失敗: {e}")
+                extracted = []
+        # 画像枚数と結果件数が不一致なら警告
+        if len(extracted) != len(uploads):
+            st.warning(f"⚠️ 画像 {len(uploads)} 枚に対し抽出 {len(extracted)} 件でした（不一致）。")
+        # sensible defaults
+        for r in extracted:
+            r.setdefault("related_store_place_id", store_map.get(linked_store))
+            r.setdefault("related_ai_contact_id",  ai_map.get(linked_ai))
+            r.setdefault("source", "名刺スキャン")
+            r.setdefault("memo", "")
+        st.session_state["meishi_draft"] = extracted
+
+    draft = st.session_state.get("meishi_draft", [])
+    if draft:
+        st.markdown("### レビュー・修正して保存")
+        draft_df = pd.DataFrame(draft)
+        for c in ["name", "kana", "company", "title", "email", "phone",
+                  "related_store_place_id", "related_ai_contact_id", "memo", "source"]:
+            if c not in draft_df.columns:
+                draft_df[c] = None
+        edited = st.data_editor(
+            draft_df,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_order=[
+                "name", "kana", "company", "title", "email", "phone",
+                "memo", "related_store_place_id", "related_ai_contact_id", "source",
+            ],
+            column_config={
+                "name": st.column_config.TextColumn("氏名", required=True),
+                "kana": st.column_config.TextColumn("ふりがな"),
+                "company": st.column_config.TextColumn("会社"),
+                "title": st.column_config.TextColumn("肩書"),
+                "email": st.column_config.TextColumn("email"),
+                "phone": st.column_config.TextColumn("電話"),
+                "memo":  st.column_config.TextColumn("メモ", width="large"),
+                "related_store_place_id": st.column_config.TextColumn("→ store place_id"),
+                "related_ai_contact_id":  st.column_config.NumberColumn("→ ai_contacts id"),
+                "source": st.column_config.TextColumn("source"),
+            },
+            key="meishi_editor",
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("💾 全部を people に保存", type="primary", key="meishi_save"):
+            n = 0
+            for _, row in edited.iterrows():
+                rd = row.to_dict()
+                if not rd.get("name"):
+                    continue
+                payload = {}
+                for k in db.PEOPLE_EDITABLE:
+                    v = rd.get(k)
+                    if pd.notna(v) and v not in ("", None):
+                        payload[k] = v
+                payload.setdefault("status", "active")
+                payload.setdefault("source", "名刺スキャン")
+                db.insert_person(payload)
+                n += 1
+            st.success(f"{n} 件を people に保存しました。")
+            st.session_state.pop("meishi_draft", None)
+            st.rerun()
+        if c2.button("🗑️ ドラフトを破棄", key="meishi_discard"):
+            st.session_state.pop("meishi_draft", None)
+            st.rerun()
+
+
+def _people_list_section():
+    st.subheader("📋 people 一覧（編集して保存）")
+    df = db.fetch_people()
+    if df.empty:
+        st.info("まだ登録された人がいません。上のインテークで追加してください。")
+        return
+
+    with st.expander("🔍 フィルタ", expanded=False):
+        f_status = st.multiselect("状態", db.PEOPLE_STATUS_VALUES, default=["active"], key="ppl_status")
+        f_company = st.text_input("会社 部分一致", "", key="ppl_company")
+        if st.button("🔄 最新を取得", key="ppl_refresh"):
+            st.rerun()
+
+    f = df.copy()
+    if f_status:
+        f = f[f["status"].isin(f_status)]
+    if f_company and "company" in f:
+        f = f[f["company"].fillna("").str.contains(f_company, case=False, na=False)]
+
+    view_cols = [
+        "id", "name", "kana", "company", "title", "email", "phone",
+        "related_store_place_id", "related_ai_contact_id",
+        "memo", "source", "status",
+    ]
+    for c in view_cols:
+        if c not in f.columns:
+            f[c] = None
+
+    edited = st.data_editor(
+        f[view_cols],
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_order=view_cols,
+        column_config={
+            "id": st.column_config.NumberColumn("id", disabled=True, width="small"),
+            "name": st.column_config.TextColumn("氏名", required=True),
+            "kana": st.column_config.TextColumn("ふりがな"),
+            "company": st.column_config.TextColumn("会社"),
+            "title": st.column_config.TextColumn("肩書"),
+            "email": st.column_config.TextColumn("email"),
+            "phone": st.column_config.TextColumn("電話"),
+            "related_store_place_id": st.column_config.TextColumn("→ store"),
+            "related_ai_contact_id":  st.column_config.NumberColumn("→ ai"),
+            "memo": st.column_config.TextColumn("メモ", width="large"),
+            "source": st.column_config.TextColumn("source"),
+            "status": st.column_config.SelectboxColumn(
+                "状態", options=db.PEOPLE_STATUS_VALUES, required=True, width="small"),
+        },
+        key="ppl_editor",
+    )
+    if st.button("💾 保存", type="primary", key="ppl_save"):
+        orig_by_id = {int(r["id"]): r for _, r in f.iterrows() if pd.notna(r.get("id"))}
+        edited_ids = {int(r["id"]) for _, r in edited.iterrows() if pd.notna(r.get("id"))}
+        ins = upd = dels = 0
+        for _, row in edited.iterrows():
+            rd = row.to_dict()
+            if pd.isna(rd.get("id")):
+                if not rd.get("name"):
+                    continue
+                payload = {k: v for k, v in rd.items() if k in db.PEOPLE_EDITABLE and pd.notna(v) and v != ""}
+                payload.setdefault("status", "active")
+                payload.setdefault("source", "手入力")
+                db.insert_person(payload)
+                ins += 1
+            else:
+                rid = int(rd["id"])
+                old = orig_by_id.get(rid)
+                if old is None:
+                    continue
+                patch = {}
+                for c in db.PEOPLE_EDITABLE:
+                    new = None if pd.isna(rd.get(c)) else rd.get(c)
+                    oldv = None if pd.isna(old.get(c)) else old.get(c)
+                    if str(new or "") != str(oldv or ""):
+                        patch[c] = new
+                if patch:
+                    patch["id"] = rid
+                    db.upsert_person(patch)
+                    upd += 1
+        for orig_id in orig_by_id:
+            if orig_id not in edited_ids:
+                db.delete_person(int(orig_id))
+                dels += 1
+        parts = []
+        if ins:  parts.append(f"追加 {ins} 件")
+        if upd:  parts.append(f"更新 {upd} 件")
+        if dels: parts.append(f"削除 {dels} 件")
+        st.success("・".join(parts)) if parts else st.info("変更はありませんでした。")
+        st.rerun()
+
+
+def render_people_tab():
+    _meishi_intake_section()
+    st.divider()
+    _people_list_section()
+
+
+# ---- app --------------------------------------------------------------------
+def main():
+    st.title("📇 Minamoto 統括CRM")
+    tab_ai, tab_stores, tab_people = st.tabs(
+        ["🤝 AI (買い手)", "🗺️ 職人 (店)", "📇 統括 (名刺)"]
+    )
+    with tab_ai:
+        render_ai_tab()
+    with tab_stores:
+        render_stores_tab()
+    with tab_people:
+        render_people_tab()
 
 
 if gate():

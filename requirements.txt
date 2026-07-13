@@ -2,3 +2,5 @@ streamlit>=1.40
 pandas>=2.2
 supabase>=2.7
 streamlit-geolocation>=0.0.10
+google-genai>=1.0
+Pillow>=10.0
