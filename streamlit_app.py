@@ -360,11 +360,26 @@ def _meishi_intake_section():
         )
 
     uploads = st.file_uploader(
-        "名刺画像（複数選択可）",
+        "📎 名刺画像をまとめてドラッグ&ドロップ or 選択（**複数枚OK**・Cmd/Ctrl+Click で複数選択）",
         type=["jpg", "jpeg", "png", "webp"],
         accept_multiple_files=True,
         key="meishi_uploads",
+        help="1回のアップロードで複数枚を同時に選べます。全部まとめて Gemini に投げて JSON で抽出します。",
     )
+
+    if uploads:
+        n = len(uploads)
+        st.caption(f"✅ **{n} 枚** アップロード済み・合計 {sum(len(u.getvalue()) for u in uploads)/1024:.0f} KB")
+        if n > 15:
+            st.warning(f"⚠️ {n} 枚は多すぎるかも（Gemini がタイムアウトする可能性）。10 枚以下推奨。")
+        # サムネイル一覧（最大 10 枚まで表示）
+        with st.expander(f"📸 プレビュー ({n} 枚)", expanded=False):
+            preview_cols = st.columns(min(5, n))
+            for i, u in enumerate(uploads[:10]):
+                with preview_cols[i % 5]:
+                    st.image(u.getvalue(), caption=u.name, use_container_width=True)
+            if n > 10:
+                st.caption(f"... 他 {n - 10} 枚")
 
     # まとめて紐付け（一括で related_store / related_ai_contact を設定）
     stores_df = db.fetch_stores()
@@ -382,7 +397,8 @@ def _meishi_intake_section():
     linked_ai    = c2.selectbox("この名刺群 → AI (会社)",   list(ai_map.keys()),    key="meishi_link_ai")
 
     can_extract = bool(uploads) and bool(gemini_key)
-    if st.button("🤖 抽出する", type="primary", disabled=not can_extract, key="meishi_extract"):
+    btn_label = f"🤖 {len(uploads)} 枚をまとめて抽出" if uploads else "🤖 抽出する"
+    if st.button(btn_label, type="primary", disabled=not can_extract, key="meishi_extract"):
         with st.spinner(f"{len(uploads)} 枚を Gemini で解析中..."):
             images = [u.read() for u in uploads]
             try:
