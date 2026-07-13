@@ -364,7 +364,7 @@ def _meishi_intake_section():
         type=["jpg", "jpeg", "png", "webp"],
         accept_multiple_files=True,
         key="meishi_uploads",
-        help="1回のアップロードで複数枚を同時に選べます。全部まとめて Gemini に投げて JSON で抽出します。",
+        help="1回のアップロードで複数枚を同時に選べます。**1 枚の写真に複数の名刺が並んでいてもOK** — Gemini が全部を別々に抽出します。",
     )
 
     if uploads:
@@ -407,9 +407,8 @@ def _meishi_intake_section():
             except Exception as e:
                 st.error(f"抽出失敗: {e}")
                 extracted = []
-        # 画像枚数と結果件数が不一致なら警告
-        if len(extracted) != len(uploads):
-            st.warning(f"⚠️ 画像 {len(uploads)} 枚に対し抽出 {len(extracted)} 件でした（不一致）。")
+        # 件数を informational で表示 (1 枚に複数名刺が写っている場合は不一致が正常)
+        st.info(f"📇 画像 {len(uploads)} 枚から **{len(extracted)} 件** の名刺を抽出。下でレビュー→保存してください。")
         # sensible defaults
         for r in extracted:
             r.setdefault("related_store_place_id", store_map.get(linked_store))
