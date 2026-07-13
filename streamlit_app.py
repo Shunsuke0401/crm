@@ -416,6 +416,9 @@ def _meishi_intake_section():
             r.setdefault("related_ai_contact_id",  ai_map.get(linked_ai))
             r.setdefault("source", "名刺スキャン")
             r.setdefault("memo", "")
+        # Streamlit Cloud logs にも吐いて、保存失敗時に復元できるようにする
+        import json as _json
+        print(f"[meishi] extracted {len(extracted)} rows: {_json.dumps(extracted, ensure_ascii=False)}", flush=True)
         st.session_state["meishi_draft"] = extracted
 
     draft = st.session_state.get("meishi_draft", [])
