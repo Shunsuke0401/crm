@@ -507,17 +507,46 @@ def _people_list_section():
         st.info("まだ登録された人がいません。上のインテークで追加してください。")
         return
 
+    # created_at を JST の日付に正規化（DB は timestamptz UTC）
+    if "created_at" in df:
+        df["_added_date_jst"] = (
+            pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+              .dt.tz_convert("Asia/Tokyo").dt.date
+        )
+    today_jst = pd.Timestamp.now(tz="Asia/Tokyo").date()
+
+    n_today = int((df["_added_date_jst"] == today_jst).sum()) if "_added_date_jst" in df else 0
+    n_week = int((df["_added_date_jst"] >= (today_jst - pd.Timedelta(days=7))).sum()) if "_added_date_jst" in df else 0
+
+    cA, cB, cC = st.columns(3)
+    cA.metric("全体", len(df))
+    cB.metric("今日 追加", n_today)
+    cC.metric("直近 7 日", n_week)
+
     with st.expander("🔍 フィルタ", expanded=False):
+        f_added = st.radio(
+            "追加日",
+            ["全部", "今日", "直近 7 日"],
+            horizontal=True,
+            key="ppl_added_filter",
+        )
         f_status = st.multiselect("状態", db.PEOPLE_STATUS_VALUES, default=["active"], key="ppl_status")
         f_company = st.text_input("会社 部分一致", "", key="ppl_company")
+        f_email_only = st.checkbox("メール持ちだけ", value=False, key="ppl_email_only")
         if st.button("🔄 最新を取得", key="ppl_refresh"):
             st.rerun()
 
     f = df.copy()
+    if f_added == "今日" and "_added_date_jst" in f:
+        f = f[f["_added_date_jst"] == today_jst]
+    elif f_added == "直近 7 日" and "_added_date_jst" in f:
+        f = f[f["_added_date_jst"] >= (today_jst - pd.Timedelta(days=7))]
     if f_status:
         f = f[f["status"].isin(f_status)]
     if f_company and "company" in f:
         f = f[f["company"].fillna("").str.contains(f_company, case=False, na=False)]
+    if f_email_only and "email" in f:
+        f = f[f["email"].fillna("").str.strip().ne("")]
 
     view_cols = [
         "id", "name", "kana", "company", "title", "email", "phone",
