@@ -139,3 +139,37 @@ def insert_person(row: dict) -> dict:
 
 def delete_person(pid: int) -> None:
     client().table("people").delete().eq("id", int(pid)).execute()
+
+
+# ---- investors (投資家) -------------------------------------------------------
+INVESTOR_STATUS_VALUES = [
+    "not_contacted", "intro_requested", "contacted",
+    "meeting", "diligence", "passed", "committed",
+]
+INVESTOR_TYPE_VALUES = ["angel", "vc", "cvc", "accelerator", "other"]
+INVESTOR_PRIORITY_VALUES = ["S", "A", "B", "C"]
+INVESTOR_EDITABLE = [
+    "name", "affiliation", "type", "status", "priority", "focus",
+    "email", "linkedin_url", "facebook_url", "x_url", "website",
+    "source", "last_contact_date", "notes",
+]
+
+
+def fetch_investors() -> pd.DataFrame:
+    rows = client().table("investors").select("*").order("id").execute().data
+    df = pd.DataFrame(rows)
+    if not df.empty and "id" in df:
+        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+    return df
+
+
+def upsert_investor(row: dict) -> dict:
+    payload = _clean(row)
+    rid = _py(row.get("id"))
+    if rid:
+        return client().table("investors").update(payload).eq("id", int(rid)).execute().data[0]
+    return client().table("investors").insert(payload).execute().data[0]
+
+
+def delete_investor(iid: int) -> None:
+    client().table("investors").delete().eq("id", int(iid)).execute()

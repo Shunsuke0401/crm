@@ -7,7 +7,7 @@
 
 ## 構成
 
-- `streamlit_app.py` — 3 タブ（AI 買い手 / 職人 / 統括=名刺）+ 名刺インテーク（Gemini 抽出）
+- `streamlit_app.py` — 4 タブ（AI 買い手 / 職人 / 統括=名刺 / 投資家）+ 名刺インテーク（Gemini 抽出）
 - `pages/1_📤_名刺CSV書き出し.py` — DB 保存なしの CSV 受け渡し専用ページ（CTO 用）
 - `lib/db.py` — Supabase client + fetch/upsert/delete
 - `lib/gemini.py` — 名刺画像の一括抽出（複数枚 / 1 枚に複数名刺も可）
@@ -20,6 +20,9 @@
 - `stores`（職人 502+）: **破壊的変更禁止**。編集可能列は status / visit_date / memo のみ
 - `ai_contacts`: 買い手。会社単位（1 行 = 1 社）
 - `people`: 名刺 = 個人。related_store_place_id / related_ai_contact_id で紐付け
+- `investors`: 投資家 = 個人（angel/vc/cvc/accelerator/other）。UNIQUE(name, affiliation)。
+  status: not_contacted/intro_requested/contacted/meeting/diligence/passed/committed。
+  ⚠️ fundraise 系セッションと共用テーブル。列追加は可・既存行の一括変更は founder 承認
 - テーブル削除・列変更・移行は **founder 承認 + 事前バックアップ**
 
 ## 既知の落とし穴

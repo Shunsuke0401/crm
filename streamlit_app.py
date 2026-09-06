@@ -627,11 +627,133 @@ def render_people_tab():
     _people_list_section()
 
 
+
+# ---- Tab 4: 投資家 (investors) ------------------------------------------------
+def _save_investor_changes(edited, original) -> tuple[int, int, int]:
+    orig_by_id = {int(r["id"]): r for _, r in original.iterrows() if pd.notna(r.get("id"))}
+    edited_ids = {int(r["id"]) for _, r in edited.iterrows() if pd.notna(r.get("id"))}
+    ins = upd = 0
+    for _, row in edited.iterrows():
+        rd = row.to_dict()
+        if pd.isna(rd.get("id")):
+            if not rd.get("name"):
+                continue
+            payload = {k: v for k, v in rd.items() if k in db.INVESTOR_EDITABLE}
+            payload.setdefault("status", "not_contacted")
+            payload.setdefault("type", "other")
+            db.upsert_investor(payload)
+            ins += 1
+        else:
+            rid = int(rd["id"])
+            old = orig_by_id.get(rid)
+            if old is None:
+                continue
+            patch = {}
+            for c in db.INVESTOR_EDITABLE:
+                new = None if pd.isna(rd.get(c)) else rd.get(c)
+                oldv = None if pd.isna(old.get(c)) else old.get(c)
+                if str(new or "") != str(oldv or ""):
+                    patch[c] = new
+            if patch:
+                patch["id"] = rid
+                db.upsert_investor(patch)
+                upd += 1
+    dels = 0
+    for orig_id in orig_by_id:
+        if orig_id not in edited_ids:
+            db.delete_investor(int(orig_id))
+            dels += 1
+    return ins, upd, dels
+
+
+def render_investors_tab():
+    st.caption("投資家 (エンジェル / VC / CVC) を個人単位で管理。出典: Biz-dev 103件 + 名刺 + Sales Nav。")
+
+    df = db.fetch_investors()
+    if df.empty:
+        st.info("まだ投資家が登録されていません。下の表で行を追加してください。")
+
+    with st.expander("🔍 フィルタ", expanded=False):
+        f_type = st.multiselect("種別", db.INVESTOR_TYPE_VALUES, key="inv_type")
+        f_status = st.multiselect("状態", db.INVESTOR_STATUS_VALUES, key="inv_status")
+        f_prio = st.multiselect("優先度", db.INVESTOR_PRIORITY_VALUES, key="inv_prio")
+        f_text = st.text_input("名前・所属・メモ 部分一致", "", key="inv_text")
+        if st.button("🔄 最新を取得", key="inv_refresh"):
+            st.rerun()
+
+    f = df.copy()
+    if not f.empty:
+        if f_type:
+            f = f[f["type"].isin(f_type)]
+        if f_status:
+            f = f[f["status"].isin(f_status)]
+        if f_prio and "priority" in f:
+            f = f[f["priority"].isin(f_prio)]
+        if f_text:
+            mask = (
+                f["name"].fillna("").str.contains(f_text, case=False, na=False)
+                | f["affiliation"].fillna("").str.contains(f_text, case=False, na=False)
+                | f["notes"].fillna("").str.contains(f_text, case=False, na=False)
+            )
+            f = f[mask]
+
+    if not df.empty:
+        c = st.columns(5)
+        c[0].metric("表示", len(f))
+        c[1].metric("angel", int((df["type"] == "angel").sum()))
+        c[2].metric("vc", int((df["type"] == "vc").sum()))
+        c[3].metric("contacted", int((df["status"] == "contacted").sum()))
+        c[4].metric("meeting+", int(df["status"].isin(["meeting", "diligence", "committed"]).sum()))
+
+    view_cols = [
+        "id", "name", "affiliation", "type", "status", "priority", "focus",
+        "email", "linkedin_url", "facebook_url", "x_url", "website",
+        "source", "last_contact_date", "notes",
+    ]
+    for c2 in view_cols:
+        if c2 not in f.columns:
+            f[c2] = None
+
+    edited = st.data_editor(
+        f[view_cols],
+        hide_index=True,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_order=view_cols,
+        column_config={
+            "id": st.column_config.NumberColumn("id", disabled=True, width="small"),
+            "name": st.column_config.TextColumn("氏名", required=True),
+            "affiliation": st.column_config.TextColumn("所属"),
+            "type": st.column_config.SelectboxColumn("種別", options=db.INVESTOR_TYPE_VALUES, width="small"),
+            "status": st.column_config.SelectboxColumn("状態", options=db.INVESTOR_STATUS_VALUES, width="small"),
+            "priority": st.column_config.SelectboxColumn("優先", options=db.INVESTOR_PRIORITY_VALUES, width="small"),
+            "focus": st.column_config.TextColumn("領域"),
+            "email": st.column_config.TextColumn("email"),
+            "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+            "facebook_url": st.column_config.LinkColumn("Facebook"),
+            "x_url": st.column_config.LinkColumn("X"),
+            "website": st.column_config.LinkColumn("web"),
+            "source": st.column_config.TextColumn("source"),
+            "last_contact_date": st.column_config.TextColumn("最終接触", help="YYYY-MM-DD"),
+            "notes": st.column_config.TextColumn("notes", width="large"),
+        },
+        key="inv_editor",
+    )
+    if st.button("💾 保存", type="primary", key="inv_save"):
+        ins, upd, dels = _save_investor_changes(edited, f)
+        parts = []
+        if ins:  parts.append(f"追加 {ins} 件")
+        if upd:  parts.append(f"更新 {upd} 件")
+        if dels: parts.append(f"削除 {dels} 件")
+        st.success("・".join(parts)) if parts else st.info("変更はありませんでした。")
+        st.rerun()
+
+
 # ---- app --------------------------------------------------------------------
 def main():
     st.title("📇 Minamoto 統括CRM")
-    tab_ai, tab_stores, tab_people = st.tabs(
-        ["🤝 AI (買い手)", "🗺️ 職人 (店)", "📇 統括 (名刺)"]
+    tab_ai, tab_stores, tab_people, tab_inv = st.tabs(
+        ["🤝 AI (買い手)", "🗺️ 職人 (店)", "📇 統括 (名刺)", "💰 投資家"]
     )
     with tab_ai:
         render_ai_tab()
@@ -639,6 +761,8 @@ def main():
         render_stores_tab()
     with tab_people:
         render_people_tab()
+    with tab_inv:
+        render_investors_tab()
 
 
 if gate():
