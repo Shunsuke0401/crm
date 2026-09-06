@@ -1,195 +1,38 @@
-# CLAUDE.md — Minamoto CRM / アウトリーチ規則
+# CLAUDE.md — Minamoto CRM アプリ（store-crm-web）
 
-このファイルは **CRM とアウトリーチを扱う全エージェントの共通ルール**。
-セッション開始時に必ず読む。ここに書いていないことは勝手に決めない。
-
----
-
-## 0. 絶対ルール（例外なし）
-
-1. **承認なしに送信しない。** メール・DM・LINE、すべて **下書きを作って founder に見せるまで**。
-   `create_draft` は OK。`send_message` / `reply` は **founder が明示的に「送って」と言った時だけ**。
-2. **言われていない情報を作らない。** 事業内容・実績・数字・相手との関係性を推測で書かない。
-   founder が言っていない事実は 1 文字も入れない。分からなければ **聞く**。
-3. **テンプレートに従う。** 下の §3 のテンプレをベースに、相手固有の情報（名前・会社・会った場所・話した内容）だけ差し替える。
-   自分の言葉で"良さそうな一文"を足さない。
-4. **不確実なことは flag する。** 「この人は VC だから資金調達に触れた方がいい？」等は **勝手に判断せず聞く**。
+このリポは **Streamlit CRM アプリのコード**。
+アウトリーチの文面・ルールはここではなく **`JDATA/plans/outreach-rules.md`** を読むこと。
 
 ---
 
-## 1. 事実の台帳（ここが唯一の真実。推測で上書きしない）
+## 構成
 
-| 項目 | 値 |
-|---|---|
-| 法人名 | **株式会社Minamoto**（2026-08-01 KK 登記。GK ではない） |
-| 代表 | 中谷 駿介 / Shunsuke Nakatani |
-| 会社メール | nakatani@minamoto.ai |
-| 日本語の署名 | **中谷** |
-| 英語の署名 | **Mark** |
-| Web | minamoto.ai ／ 職人向け minamoto.ai/ja/partners |
-| Calendly | https://calendly.com/markirisdao/meeting |
-| 事業の一言説明（英語） | building the data layer for Physical AI to help tackle Japan's labor shortage |
+- `streamlit_app.py` — 3 タブ（AI 買い手 / 職人 / 統括=名刺）+ 名刺インテーク（Gemini 抽出）
+- `pages/1_📤_名刺CSV書き出し.py` — DB 保存なしの CSV 受け渡し専用ページ（CTO 用）
+- `lib/db.py` — Supabase client + fetch/upsert/delete
+- `lib/gemini.py` — 名刺画像の一括抽出（複数枚 / 1 枚に複数名刺も可）
+- デプロイ: GitHub `Shunsuke0401/crm` main → Streamlit Cloud 自動デプロイ
+- Secrets: SUPABASE_URL / SUPABASE_KEY / GOOGLE_MAPS_API_KEY / GEMINI_API_KEY / GEMINI_MODEL / APP_PASSWORD
 
----
+## DB（Supabase）
 
-## 2. アウトリーチの 3 区分
+- Project: `rlowtjfouvwmcjksjvvj`／アカウントは **nakatani@minamoto.ai**（個人 Gmail 側ではない）
+- `stores`（職人 502+）: **破壊的変更禁止**。編集可能列は status / visit_date / memo のみ
+- `ai_contacts`: 買い手。会社単位（1 行 = 1 社）
+- `people`: 名刺 = 個人。related_store_place_id / related_ai_contact_id で紐付け
+- テーブル削除・列変更・移行は **founder 承認 + 事前バックアップ**
 
-| 区分 | 相手 | 目的 | DB |
-|---|---|---|---|
-| **A. 投資家** | VC / エンジェル / インキュベータ | 関係構築 → ピッチ機会 | `people` |
-| **B. 職人・現場** | 板金／花屋／修理店など収集先 | 撮影協力の獲得・関係維持 | `stores` + `people` |
-| **C. 研究者・買い手** | AI ラボ / VLA / World Model | データ提供先の開拓 | `ai_contacts` + `people` |
+## 既知の落とし穴
 
-**判断に迷ったら founder に区分を聞く。** 名刺の肩書だけで勝手に区分しない。
+- **`st.data_editor` の型互換**: Supabase の DATE は文字列で返る → DateColumn 不可（TextColumn を使う）。
+  id 系は nullable Int64 に cast（`lib/db.py` の fetch 参照）
+- **numpy 型は Supabase 送信前に Python native へ**（`lib/db.py` の `_py()` / `_clean()` 経由。直接 insert しない）
+- **Gemini モデル ID は deprecate される** → Secrets の `GEMINI_MODEL` で上書き（コード変更不要）
+- Supabase 無料枠は inactivity で pause することがある → Dashboard から Restore
+- 名刺 batch が二重実行されると people に重複が入る → 取り込み後に重複チェック
 
----
+## ルール
 
-## 3. テンプレート
-
-差し替えてよいのは `[ ]` の箇所のみ。それ以外は原則いじらない。
-
-### 3-1. 共通：名刺交換後のお礼（全区分の初手）
-
-```
-[姓]様
-
-本日はお会いできてよかったです。
-少しでもお話しできて嬉しかったです。
-
-今後ともよろしくお願いいたします。
-
-中谷
-```
-
-- 件名：`本日はありがとうございました`
-- **「本日」か「先日」かを必ず確認する。** 間違えると事故。分からなければ聞く。
-
-### 3-2. A. 投資家：ピッチ依頼まで踏み込む版
-
-```
-[姓]様
-
-本日お話しさせていただきました、株式会社Minamotoの中谷です。
-事業についても聞いていただけて、非常によかったです。
-
-まだまだこれからブラッシュアップしていく段階ですが、ご指導のほどよろしくお願いいたします。
-
-ぜひタイミングをみて、[時期] 一度ピッチのお時間をいただけますと嬉しいです。
-
-引き続き、どうぞよろしくお願いいたします。
-
-中谷
-```
-
-- 件名：`本日はありがとうございました（株式会社Minamoto 中谷）`
-- `[時期]` は founder が指定した時だけ入れる（例：「9月の2週目あたりで」）。指定がなければ削除。
-
-### 3-3. A. 投資家：軽く資金調達だけ匂わせる版
-
-3-1 の末尾に **この 1 行だけ** 足す：
-
-```
-資金調達も考えておりますので、今後ともどうぞよろしくお願いいたします。
-```
-
-### 3-4. B. 職人・現場：撮影依頼
-
-```
-[姓]さん
-
-お疲れ様です、中谷です。
-
-[状況説明：founder が言った事実のみ]
-
-[依頼内容：期間・人数・条件を founder の指定通りに]
-
-急なお願いなので難しければ全く問題ございません。
-どちらにせよ、一度ご挨拶させていただければと思います。
-
-何卒よろしくお願いいたします。
-
-中谷
-```
-
-- 職人には **「様」でなく「さん」**（対面で関係ができている前提）
-- **撮影の負担が軽いことを必ず書く**：「普段の作業を撮らせていただくだけ」「小型カメラを頭につけていただくだけ」「普段のオペレーションにご迷惑をおかけしない」
-- ⚠️ **「AI 開発のため」と前に出さない**（現場が身構える）。謝礼・目的の順番は founder の指示に従う。
-
-### 3-5. C. 研究者・買い手（英語）
-
-```
-Hey [First name],
-
-[context: how you found them / where you met]
-
-I'm Mark, founder of Minamoto (minamoto.ai) — we're building the data layer for Physical AI to help tackle Japan's labor shortage.
-
-[the ask]
-
-Thanks!
-Mark
-```
-
-### 3-6. C. 研究者（日本語）
-
-⚠️ **未確定。** founder から確定テンプレをもらうまで、この区分は 3-1 を流用し、
-踏み込んだ内容は勝手に書かず founder に確認する。
-
----
-
-## 4. 文面ルール
-
-### やること
-- 相手の**名刺どおりの漢字**を使う（例：槙 と 槇 は別字。DB の登録が正）
-- 初対面ビジネス = **様** ／ 関係ができている相手 = **さん**
-- 段落間は空行のみ。**文中で改行しない**（コピペ時に崩れる）
-- 短く。1 メール 1 用件。
-
-### やらないこと
-- ❌ 「貴重なお時間を賜り」「ご清栄のこととお慶び申し上げます」等の硬い定型 → founder のトーンに合わない
-- ❌ 「まだまだ未熟ではございますが、今後ともご指導いただけますと幸いです」を全員に一律で付ける（→ 硬すぎると却下された実績あり）
-- ❌ 事業内容を長々と説明する（相手が聞いてきたら答える）
-- ❌ 自分で考えた"気の利いた一文"の追加
-
----
-
-## 5. CRM 操作ルール
-
-### DB
-- Supabase project: `rlowtjfouvwmcjksjvvj`（アカウント: **nakatani@minamoto.ai**。個人 Gmail のプロジェクトではない）
-- テーブル：`stores`（職人 502件）/ `ai_contacts`（買い手・会社単位）/ `people`（名刺・個人）
-- **`stores` は破壊的変更禁止。**
-- 削除・列変更・データ移行は **founder 承認 + 事前バックアップ**。
-
-### 名刺取り込み後
-1. `created_at` で「今日追加」を絞って対象を確定（JST で判定）
-2. **重複を必ずチェック**（同じ batch が 2 回走る事故が実績あり）
-3. メールがない人はスキップして founder に報告
-4. CRM の `memo` に会った文脈を 1 行残す
-
-### アウトリーチの記録
-送信した／下書きを作ったら `people.memo` に追記する。次のエージェントが同じ人に二重送信しないため。
-
----
-
-## 6. 送信前チェックリスト（毎回）
-
-- [ ] **メールアドレスのドメインは正しいか**（`thetimesventures` → 正しくは `thetatimesventures` でバウンスした事故あり）
-- [ ] 「本日」か「先日」か合っているか
-- [ ] 敬称（様／さん）は合っているか
-- [ ] 漢字は名刺どおりか
-- [ ] founder が言っていない事実が混ざっていないか
-- [ ] 同じ人への下書きが二重に存在していないか
-
----
-
-## 7. 既知の技術的な落とし穴
-
-- **Gmail MCP の `update_draft` は下書きを消す。** 成功レスポンスを返すが実際には消えている。
-  **修正するときは create_draft で作り直す。**
-- 下書きを作った後は `list_drafts` で存在確認する。
-- Gemini のモデル ID は deprecate される。Secrets の `GEMINI_MODEL` で上書きできる。
-
----
-
-*変更は founder の承認を得てから。エージェントが勝手に書き換えない。*
+1. 動作確認前に「直った」と言わない
+2. push 前に `python3 -m py_compile` で構文チェック
+3. main 直 push で Streamlit Cloud に即反映される。壊れた状態を push しない
