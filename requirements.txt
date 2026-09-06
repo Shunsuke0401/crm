@@ -4,3 +4,5 @@ supabase>=2.7
 streamlit-geolocation>=0.0.10
 google-genai>=1.0
 Pillow>=10.0
+
+# rebuild trigger: 2026-09-07 investors tab module reload
